@@ -1,0 +1,12 @@
+[project]
+name = "security"
+version = "0.1.0"
+description = "The security toolkit for the Python comminity."
+readme = "README.md"
+authors = [
+    { name = "Dani Alcala", email = "danalitovsky@gmail.com" }
+]
+license = { file = "LICENSE.txt" }
+keywords = ["security"]
+requires-python = ">=3.8"
+
