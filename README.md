@@ -1,2 +1,2 @@
-# python-security
+# security
 Security toolkit for the Python community
