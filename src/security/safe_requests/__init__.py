@@ -1,2 +1,1 @@
-def get():
-    pass
+from .api import get

@@ -1,0 +1,2 @@
+class SecurityException(Exception):
+    pass
