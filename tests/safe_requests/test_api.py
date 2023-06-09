@@ -1,6 +1,7 @@
 import pytest
 from security.exceptions import SecurityException
 from security.safe_requests import get
+from security.safe_requests.host_validators import DefaultHostValidator
 
 
 class TestSafeRequestApi:
@@ -16,3 +17,8 @@ class TestSafeRequestApi:
     def test_url_safe_protocol_allowed(self):
         r = get("ftp://example.com/file.txt", allowed_protocols=("ftp",))
         assert r is not None
+
+    @pytest.mark.parametrize("host", DefaultHostValidator.KNOWN_INFRASTRUCTURE_HOSTS)
+    def test_unsafe_host(self, host):
+        with pytest.raises(SecurityException):
+            get(f"http://{host}/user-data/")

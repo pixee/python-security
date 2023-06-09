@@ -1,0 +1,2 @@
+Things to document:
+- explain how to create and use a custom HostValidator that inherits from BaseValidator
