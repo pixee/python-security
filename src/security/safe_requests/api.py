@@ -1,6 +1,6 @@
 from .host_validators import DefaultHostValidator
 from security.exceptions import SecurityException
-from requests import get as unsafe_get
+from requests import get as unsafe_get, post as unsafe_post
 from urllib.parse import urlparse
 
 DEFAULT_PROTOCOLS = frozenset(("http", "https"))
@@ -19,6 +19,18 @@ class UrlParser:
     def host(self):
         return self.parsed_url.netloc
 
+    def check(self, allowed_protocols, host_validator):
+        self._check_protocol(allowed_protocols)
+        self._check_host(host_validator)
+
+    def _check_protocol(self, allowed_protocols):
+        if self.protocol not in allowed_protocols:
+            raise SecurityException("Disallowed protocol: %s", self.protocol)
+
+    def _check_host(self, host_validator):
+        if not host_validator(self.host).is_allowed:
+            raise SecurityException("Disallowed host: %s", self.host)
+
 
 def get(
     url,
@@ -27,17 +39,17 @@ def get(
     host_validator=DefaultHostValidator,
     **kwargs,
 ):
-    parsed_url = UrlParser(url)
-    _check_protocol(parsed_url.protocol, allowed_protocols)
-    _check_host(parsed_url.host, host_validator)
+    UrlParser(url).check(allowed_protocols, host_validator)
     return unsafe_get(url, params=params, **kwargs)
 
 
-def _check_protocol(protocol, allowed_protocols):
-    if protocol not in allowed_protocols:
-        raise SecurityException("Disallowed protocol: %s", protocol)
-
-
-def _check_host(host, host_validator):
-    if not host_validator(host).is_allowed:
-        raise SecurityException("Disallowed host: %s", host)
+def post(
+    url,
+    data=None,
+    json=None,
+    allowed_protocols=DEFAULT_PROTOCOLS,
+    host_validator=DefaultHostValidator,
+    **kwargs,
+):
+    UrlParser(url).check(allowed_protocols, host_validator)
+    return unsafe_post(url, data=data, json=json, **kwargs)
