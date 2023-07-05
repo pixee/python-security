@@ -69,3 +69,16 @@ class TestSafeCommandApi:
         with pytest.raises(SecurityException) as err:
             safe_command.run(original_func, command)
         assert err.value.args[0] == "Multiple commands not allowed: %s"
+
+    @pytest.mark.parametrize(
+        "command",
+        ["rpm -i badware", "curl http://evil.com/", "wget http://evil.com/"],
+    )
+    def test_blocks_banned_exc(self, command, original_func):
+        with pytest.raises(SecurityException) as err:
+            safe_command.run(
+                original_func,
+                command,
+                restrictions=["PREVENT_COMMON_EXPLOIT_EXECUTABLES"],
+            )
+        assert err.value.args[0] == "Disallowed command: %s"

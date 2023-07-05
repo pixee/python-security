@@ -19,6 +19,8 @@ SENSITIVE_FILE_NAMES = frozenset(
     )
 )
 
+BANNED_EXECUTABLES = frozenset(("nc", "curl", "wget", "dpkg", "rpm"))
+
 
 def run(original_func, command, *args, restrictions=DEFAULT_CHECKS, **kwargs):
     check(command, restrictions)
@@ -49,6 +51,9 @@ def check(command, restrictions):
     if "PREVENT_COMMAND_CHAINING" in restrictions:
         check_multiple_commands(command)
 
+    if "PREVENT_COMMON_EXPLOIT_EXECUTABLES" in restrictions:
+        check_banned_executable(parsed_command)
+
 
 def check_sensitive_files(parsed_command: list):
     for cmd in parsed_command:
@@ -67,3 +72,8 @@ def check_multiple_commands(command: str):
     if isinstance(command, list):
         if any(cmd in separators for cmd in command):
             raise SecurityException("Multiple commands not allowed: %s", command)
+
+
+def check_banned_executable(parsed_command: list):
+    if any(cmd in BANNED_EXECUTABLES for cmd in parsed_command):
+        raise SecurityException("Disallowed command: %s", parsed_command)
