@@ -43,10 +43,29 @@ class TestSafeCommandApi:
         ],
     )
     def test_blocks_sensitive_files(self, command, original_func):
-        with pytest.raises(SecurityException):
+        with pytest.raises(SecurityException) as err:
             safe_command.run(original_func, command)
+        assert err.value.args[0] == "Disallowed access to sensitive file: %s"
 
     @mock.patch("security.safe_command.api._call_original")
     def test_no_restrictions(self, mock_call_original, original_func):
         safe_command.run(original_func, "cat /etc/passwd", restrictions=[])
         mock_call_original.assert_called()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "foo&& cat test.txt #",
+            "foo ; ls",
+            "foo & ls",
+            "foo | ls",
+            "foo | ls & foo ; bar",
+            "foo ;ls",
+            "ls # this isn't fine\ncat /foo",
+            "echo hi | write_to_file",
+        ],
+    )
+    def test_blocks_command_chaining(self, command, original_func):
+        with pytest.raises(SecurityException) as err:
+            safe_command.run(original_func, command)
+        assert err.value.args[0] == "Multiple commands not allowed: %s"

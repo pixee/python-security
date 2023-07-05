@@ -36,7 +36,7 @@ def check(command, restrictions):
         if not command.strip():
             # Empty commands are safe
             return
-        parsed_command = shlex.split(command)
+        parsed_command = shlex.split(command, comments=True)
     if isinstance(command, list):
         if not command:
             # Empty commands are safe
@@ -46,9 +46,24 @@ def check(command, restrictions):
     if "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES" in restrictions:
         check_sensitive_files(parsed_command)
 
+    if "PREVENT_COMMAND_CHAINING" in restrictions:
+        check_multiple_commands(command)
+
 
 def check_sensitive_files(parsed_command: list):
     for cmd in parsed_command:
         path = Path(cmd)
         if any(str(path).endswith(sensitive) for sensitive in SENSITIVE_FILE_NAMES):
             raise SecurityException("Disallowed access to sensitive file: %s", cmd)
+
+
+def check_multiple_commands(command: str):
+    separators = ["&", ";", "|", "\n"]
+    if isinstance(command, str):
+        stripped = command.strip()
+        if any(sep in stripped for sep in separators):
+            raise SecurityException("Multiple commands not allowed: %s", command)
+
+    if isinstance(command, list):
+        if any(cmd in separators for cmd in command):
+            raise SecurityException("Multiple commands not allowed: %s", command)
