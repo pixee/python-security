@@ -22,6 +22,10 @@ SENSITIVE_FILE_NAMES = frozenset(
 
 def run(original_func, command, *args, restrictions=DEFAULT_CHECKS, **kwargs):
     check(command, restrictions)
+    return _call_original(original_func, command, *args, **kwargs)
+
+
+def _call_original(original_func, command, *args, **kwargs):
     return original_func(command, *args, **kwargs)
 
 

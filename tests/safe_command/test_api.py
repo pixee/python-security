@@ -1,3 +1,4 @@
+import mock
 import pytest
 import subprocess
 from security.exceptions import SecurityException
@@ -44,3 +45,8 @@ class TestSafeCommandApi:
     def test_blocks_sensitive_files(self, command, original_func):
         with pytest.raises(SecurityException):
             safe_command.run(original_func, command)
+
+    @mock.patch("security.safe_command.api._call_original")
+    def test_no_restrictions(self, mock_call_original, original_func):
+        safe_command.run(original_func, "cat /etc/passwd", restrictions=[])
+        mock_call_original.assert_called()
