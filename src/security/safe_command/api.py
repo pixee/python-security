@@ -27,6 +27,9 @@ def run(original_func, command, *args, restrictions=DEFAULT_CHECKS, **kwargs):
     return _call_original(original_func, command, *args, **kwargs)
 
 
+call = run
+
+
 def _call_original(original_func, command, *args, **kwargs):
     return original_func(command, *args, **kwargs)
 
