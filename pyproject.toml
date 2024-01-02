@@ -1,14 +1,25 @@
+[build-system]
+requires = ["setuptools", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
 [project]
+authors = [{name = "Pixee", email = "python@pixee.ai"}]
+dynamic = ["version"]
 name = "security"
-version = "1.0.1"
-description = "The security toolkit for the Python comminity."
-readme = "README.md"
-authors = [
-    { name = "Dani Alcala", email = "danalitovsky@gmail.com" }
-]
-license = { file = "LICENSE.txt" }
-keywords = ["security"]
 requires-python = ">=3.8"
+readme = "README.md"
+license = { file = "LICENSE.txt" }
+description = "The security toolkit for the Python community"
+keywords = ["security", "appsec"]
 dependencies = [
     "requests",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pixee/python-security"
+Repository = "https://github.com/pixee/python-security"
+
+[tool.setuptools]
+
+[tool.setuptools_scm]
+version_file = "src/security/_version.py"
