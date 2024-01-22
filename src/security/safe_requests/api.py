@@ -1,6 +1,6 @@
 from .host_validators import DefaultHostValidator
 from security.exceptions import SecurityException
-from requests import get as unsafe_get, post as unsafe_post
+from security.safe_requests import get as unsafe_get, post as unsafe_post
 from urllib.parse import urlparse
 
 DEFAULT_PROTOCOLS = frozenset(("http", "https"))
