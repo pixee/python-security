@@ -1,11 +1,11 @@
 from pathlib import Path
 import shlex
-from glob import glob
-from os import get_exec_path
-from shutil import which
-from subprocess import CompletedProcess
-from typing import Union, List, Tuple, TypeAlias, Callable
 from security.exceptions import SecurityException
+from subprocess import CompletedProcess
+from typing import Union, List, Tuple, TypeAlias
+from glob import glob
+from os import get_exec_path, getenv
+from shutil import which
 
 ValidRestrictions: TypeAlias = Union[list[str], tuple[str], set[str], frozenset[str], None]
 ValidCommand: TypeAlias = Union[str, list[str]]
@@ -50,7 +50,10 @@ BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
 
 )
 
-def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions=DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
+IFS = getenv("IFS", " \t\n")
+
+
+def run(original_func, command, *args, restrictions=DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
     # If there is a command and it passes the checks pass it the original function call
     if command:
         check(command, restrictions)
@@ -63,23 +66,27 @@ def run(original_func: Callable, command: ValidCommand, *args, restrictions: Val
 call = run
 
 
-def _call_original(original_func: Callable, command: ValidCommand, *args, **kwargs) -> Union[CompletedProcess, None]:
+def _call_original(original_func, command, *args, **kwargs) -> Union[CompletedProcess, None]:
     return original_func(command, *args, **kwargs)
 
 
-def _parse_command(command: ValidCommand) -> Union[List[str], None]:
+def _replace_IFS(cmd_part: str) -> str:
+    return cmd_part.replace("$IFS", IFS[0]).replace("${IFS}", IFS[0])
+
+
+def _parse_command(command: Union[str, list]) -> Union[List[str], None]:
     if isinstance(command, str):
         if not command.strip():
             # Empty commands are safe
             return None
-        parsed_command = shlex.split(command, comments=True)
+        parsed_command = shlex.split(_replace_IFS(command), comments=True)
     elif isinstance(command, list):
         if not command or command == [""]:
             # Empty commands are safe
             return None
         
         # Join then split with shlex to process shell-like syntax correctly. 
-        parsed_command = shlex.split(shlex.join(command), comments=True)
+        parsed_command = shlex.split(_replace_IFS(shlex.join(command)), comments=True)
     else:
         raise TypeError("Command must be a str or a list")
 
@@ -103,7 +110,7 @@ def _resolve_paths_in_parsed_command(parsed_command: list) -> Tuple[set[Path], s
     # for comparison with the sensitive files common exploit executables and group/owner checks.
 
     abs_paths, abs_path_strings = set(), set()
-    # A second shlex split is needed to handle shell-like syntax correctly when wrapped in quotes before globbing
+    # A second shlex split is done to handle shell-like syntax correctly when wrapped in quotes before globbing
     cmd_parts = [cmd_part for cmd_arg in parsed_command for cmd_part in shlex.split(cmd_arg.strip("'\""))]
     for cmd_part in cmd_parts:
         # check if the cmd_part is an executable and resolve the path
@@ -159,7 +166,7 @@ def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
         check_sensitive_files(command, abs_path_strings)
 
     if "PREVENT_COMMON_EXPLOIT_EXECUTABLES" in restrictions:
-        check_banned_executable(command, abs_paths)
+        check_banned_executable(command, abs_path_strings)
 
     for path in abs_paths:
         if "PREVENT_UNCOMMON_PATH_TYPES" in restrictions:
@@ -200,15 +207,14 @@ def check_multiple_commands(command: ValidCommand, parsed_command: list) -> None
 def check_sensitive_files(command: ValidCommand, abs_path_strings: set[str]) -> None:
     for sensitive_path in SENSITIVE_FILE_NAMES:
         if (sensitive_path in command 
-            or sensitive_path in abs_path_strings
-            or any(str(path).endswith(sensitive_path) for path in abs_path_strings)):
+            or any(abs_path_string.endswith(sensitive_path) for abs_path_string in abs_path_strings)):
             raise SecurityException(
                 "Disallowed access to sensitive file: " + sensitive_path)
 
 
-def check_banned_executable(command: ValidCommand, abs_paths: set[Path]) -> None:
+def check_banned_executable(command: ValidCommand, abs_path_strings: set[str]) -> None:
     for banned_executable in BANNED_EXECUTABLES:
-        if (any(str(path).endswith(banned_executable) for path in abs_paths)
+        if (any((abs_path_string.endswith(f"/{banned_executable}") for abs_path_string in abs_path_strings))
             or (isinstance(command, str) 
                 and (command.startswith(f"{banned_executable} ") 
                      or f"bin/{banned_executable}" in command 

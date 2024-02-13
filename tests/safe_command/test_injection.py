@@ -8,7 +8,7 @@ from security.safe_command import safe_command
 from security.safe_command.api import _parse_command, _resolve_paths_in_parsed_command
 from security.exceptions import SecurityException
 
-class TestSafeCommands(unittest.TestCase):
+class TestSafeCommandInjection(unittest.TestCase):
     EXCEPTIONS = {
         "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES": SecurityException("Disallowed access to sensitive file"),
         "PREVENT_COMMAND_CHAINING": SecurityException("Multiple commands not allowed"),
@@ -272,6 +272,9 @@ class TestSafeCommands(unittest.TestCase):
             ("/bin/nc", "-l", "-p", "1234"): exception,
             "/usr/bin/nc* -l -p 1234": exception,
             ("/usr/bin/nc*", "-l", "-p", "1234"): exception,
+            # Check that IFS can't be used to bypass
+            "nc$IFS-l${IFS}-p${IFS}1234": exception,
+            ("nc$IFS-l${IFS}-p${IFS}1234"): exception,
         }
 
         self._do_test_commands(test_commands, restrictions)
