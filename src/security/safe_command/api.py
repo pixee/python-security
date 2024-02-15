@@ -39,7 +39,7 @@ BANNED_PATHTYPES = frozenset(
     ("mount", "symlink", "block_device", "char_device", "fifo", "socket"))
 BANNED_OWNERS = frozenset(("root", "admin", "wheel", "sudo"))
 BANNED_GROUPS = frozenset(("root", "admin", "wheel", "sudo"))
-BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n", "<>"))
+BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n"))
 BANNED_PROCESS_SUBSTITUTION_OPERATORS = frozenset(("$(", "`", "<(", ">("))
 BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
     "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
@@ -53,6 +53,7 @@ BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
 
 SHELL_VARIABLE_REGEX = re_compile(r'(\$[a-zA-Z_][a-zA-Z0-9_]*)')
 SHELL_EXPANSION_REGEX = re_compile(r'(([\$\S])*(\{[^{}]+?\})[^\s\$]*)')
+REDIRECTION_OPERATORS_REGEX = re_compile(r'(?!<\()(<<?<?[-&]?[-&p]?|(?:\d+|&)?>>?&?-?(?:\d+|\|)?|<>)')
 
 
 def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions = DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
@@ -175,31 +176,43 @@ def _shell_expand(command: str) -> str:
     return command
 
 
-def _recursive_shlex_split(command_str: str) -> Iterator[str]:
-    for cmd_part in shlex.split(command_str, comments=True):
+def _space_redirects(command: str) -> str:
+    # Space out redirect operators to avoid them being combined with the next or previous command part when splitting
+    return REDIRECTION_OPERATORS_REGEX.sub(r' \1 ', command)
+
+
+def _recursive_shlex_split(command: str) -> Iterator[str]:
+    for cmd_part in shlex.split(command, comments=True):
         yield cmd_part
 
+        # Strip either type of quotes but not both
+        if cmd_part.startswith("'") and cmd_part.endswith("'"):
+            cmd_part = cmd_part.strip("'")
+        elif cmd_part.startswith('"') and cmd_part.endswith('"'):
+            cmd_part = cmd_part.strip('"')
+
         if '"' in cmd_part or "'" in cmd_part or " " in cmd_part:
-            yield from _recursive_shlex_split(cmd_part.strip("\"\''"))
+            yield from _recursive_shlex_split(cmd_part)
         
 
-def _parse_command(command: Union[str, list]) -> Optional[Tuple[str, List[str]]]:
+def _parse_command(command: ValidCommand) -> Optional[Tuple[str, List[str]]]:
     if isinstance(command, str):
         if not command.strip():
             # Empty commands are safe
             return None
         
-        expanded_command = _shell_expand(command)
+        command_str = command
     elif isinstance(command, list):
         if not command or command == [""]:
             # Empty commands are safe
             return None
-
-        expanded_command = _shell_expand(" ".join(command))
+        
+        command_str = " ".join(command)
     else:
         raise TypeError("Command must be a str or a list")
 
-
+    spaced_command = _space_redirects(command_str)
+    expanded_command = _shell_expand(spaced_command)
     parsed_command = list(_recursive_shlex_split(expanded_command))
     return expanded_command, parsed_command
 
