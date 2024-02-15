@@ -1,24 +1,25 @@
-from pathlib import Path
 import shlex
-from security.exceptions import SecurityException
-from subprocess import CompletedProcess
-from typing import Union, List, Tuple, TypeAlias
-from glob import glob
-from os import get_exec_path, getenv
+from re import compile as re_compile
+from pathlib import Path
+from glob import iglob
+from os import getenv, get_exec_path, access, X_OK
+from os.path import expanduser, expandvars
 from shutil import which
+from subprocess import CompletedProcess
+from typing import Union, Optional, List, Tuple, Set, FrozenSet, Sequence, Callable, Iterator
+from security.exceptions import SecurityException
 
-ValidRestrictions: TypeAlias = Union[list[str], tuple[str], set[str], frozenset[str], None]
-ValidCommand: TypeAlias = Union[str, list[str]]
+ValidRestrictions = Optional[Union[FrozenSet[str], Sequence[str]]]
+ValidCommand = Union[str, List[str]]
 
 DEFAULT_CHECKS = frozenset(
-    ("PREVENT_COMMAND_CHAINING", 
+    ("PREVENT_COMMAND_CHAINING",
      "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES",
-     "PREVENT_COMMON_EXPLOIT_EXECUTABLES", 
-     "PREVENT_UNCOMMON_PATH_TYPES",
-     "PREVENT_ADMIN_OWNED_FILES")
+     "PREVENT_COMMON_EXPLOIT_EXECUTABLES",
+     )
 )
 
-SENSITIVE_FILE_NAMES = frozenset(
+SENSITIVE_FILE_PATHS = frozenset(
     (
         "/etc/passwd",
         "/etc/shadow",
@@ -32,141 +33,258 @@ SENSITIVE_FILE_NAMES = frozenset(
     )
 )
 
-BANNED_EXECUTABLES = frozenset(("nc", "netcat", "ncat", "curl", "wget", "dpkg", "rpm"))
+BANNED_EXECUTABLES = frozenset(
+    ("nc", "netcat", "ncat", "curl", "wget", "dpkg", "rpm"))
 BANNED_PATHTYPES = frozenset(
     ("mount", "symlink", "block_device", "char_device", "fifo", "socket"))
 BANNED_OWNERS = frozenset(("root", "admin", "wheel", "sudo"))
 BANNED_GROUPS = frozenset(("root", "admin", "wheel", "sudo"))
-BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n"))
+BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n", "<>"))
 BANNED_PROCESS_SUBSTITUTION_OPERATORS = frozenset(("$(", "`", "<(", ">("))
 BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
-    "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit", 
+    "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
     "bash", "sh", "zsh", "csh", "rsh", "tcsh", "ksh", "dash", "fish", "powershell", "pwsh", "pwsh-preview", "pwsh-lts",
     "xargs", "awk", "perl", "python", "ruby", "php", "lua", "tclsh", "sqlplus",
     "expect", "screen", "tmux", "byobu", "byobu-ugraph", "script", "scriptreplay", "scriptlive",
     "nohup", "at", "batch", "anacron", "cron", "crontab", "systemctl", "service", "init", "telinit",
     "systemd", "systemd-run"
-    )
-
-)
-
-IFS = getenv("IFS", " \t\n")
+))
 
 
-def run(original_func, command, *args, restrictions=DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
+SHELL_VARIABLE_REGEX = re_compile(r'(\$[a-zA-Z_][a-zA-Z0-9_]*)')
+SHELL_EXPANSION_REGEX = re_compile(r'(([\$\S])*(\{[^{}]+?\})[^\s\$]*)')
+
+
+def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions = DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
     # If there is a command and it passes the checks pass it the original function call
-    if command:
-        check(command, restrictions)
-        return _call_original(original_func, command, *args, **kwargs)
-
-    # If there is no command, return None
-    return None
+    check(command, restrictions)
+    return _call_original(original_func, command, *args, **kwargs)
 
 
 call = run
 
 
-def _call_original(original_func, command, *args, **kwargs) -> Union[CompletedProcess, None]:
+def _call_original(original_func: Callable, command: ValidCommand, *args, **kwargs) -> Union[CompletedProcess, None]:
     return original_func(command, *args, **kwargs)
 
 
-def _replace_IFS(cmd_part: str) -> str:
-    return cmd_part.replace("$IFS", IFS[0]).replace("${IFS}", IFS[0])
+def _get_env_var_value(var: str) -> str:
+    if (expanded_var := expandvars(var)) != var:
+        return expanded_var
+    elif (expanded_var := getenv(var)):
+        return expanded_var
+    else:
+        return ""
 
 
-def _parse_command(command: Union[str, list]) -> Union[List[str], None]:
+def _shell_expand(command: str) -> str:
+    # Handles simple shell variable expansion like $HOME, $PWD, $IFS
+    for match in SHELL_VARIABLE_REGEX.finditer(command):
+        shell_var_str = match.group(0)
+        var = shell_var_str[1:]
+        value = _get_env_var_value(var)       
+        
+        # Explicitly set IFS to space if it is empty since IFS is not always returned by expandvars or getenv on all systems
+        if var == "IFS" and not value:
+                value = " "
+
+        command = command.replace(shell_var_str, value)
+
+    # Handle Complex Parameter, Brace and Sequence shell expansions 
+    for match in SHELL_EXPANSION_REGEX.finditer(command):
+        full_expansion, prefix, brackets = match.groups()
+        inside_brackets = brackets[1:-1]
+        
+        if prefix == "$":
+            # Handles Parameter expansion like ${var:-defaultval}, ${var:=defaultval}, ${var:+defaultval}, ${var:?defaultval}
+            var, *expansion_params = inside_brackets.split(":")
+            
+            value, operation, default = "", "", ""
+            start_slice, end_slice = None, None
+            if expansion_params:
+                expansion_param_1 = expansion_params.pop(0)
+                first_char = expansion_param_1[0]
+                if first_char.isdigit() or (first_char == "-" and expansion_param_1[1:].isdigit()):
+                    start_slice = int(expansion_param_1)
+                    if expansion_params:
+                        expansion_param_2 = expansion_params[0]
+                        end_slice = int(expansion_param_2)
+                else:
+                    operation = first_char
+                    default = expansion_param_1[1:]
+
+            value = _get_env_var_value(var)
+            if start_slice is not None:
+                value = value[start_slice:end_slice]
+            elif not operation or operation == "?":
+                value = value
+            elif operation in "-=":
+                value = value or default
+            elif operation == "+":
+                value = default if value else ""
+            
+            # Explicitly set IFS to space but only after checking for a default value
+            if var == "IFS" and not value:
+                value = " "
+
+            command = command.replace(f"${brackets}", value)
+            
+        else:
+            # Handles Brace and sequence expansion like {1..10..2}, {a,b,c}, {1..10}, {1..-1}
+            values = []           
+            if (',' not in inside_brackets 
+                and len(inside_params := inside_brackets.split('..')) in (2,3)
+                and all(param.isdigit() or param.startswith("-") for param in inside_params)
+                ):
+                
+                # Sequence expansion
+                inside_params = list(map(int, inside_params))
+                if len(inside_params) == 2:
+                    inside_params.append(1)
+                start, end, step = inside_params
+                
+                sequence = None
+                if start <= end and step > 0:
+                    sequence = range(start, end+1, step)   
+                elif start <= end and step < 0:
+                    sequence = range(end-1, start-1, step)   
+                elif start > end and step > 0:
+                    sequence = range(start, end-1, -step)   
+                elif start > end and step < 0:
+                    sequence = reversed(range(start, end-1, step))   
+
+                if sequence:
+                    for i in sequence:
+                        values.append(full_expansion.replace(brackets, str(i)))
+                else:
+                    values.append(full_expansion.replace(brackets, inside_brackets))
+                
+            else:
+                # Brace expansion
+                for var in inside_brackets.split(','):
+                    var = var.strip("\"'")
+                    if var.startswith("$"):
+                        var_value = _get_env_var_value(var)
+                    else:
+                        var_value = var
+                    values.append(full_expansion.replace(brackets, var_value, 1))
+            
+            value = ' '.join(values)
+            command = command.replace(full_expansion, value)
+
+    return command
+
+
+def _recursive_shlex_split(command_str: str) -> Iterator[str]:
+    for cmd_part in shlex.split(command_str, comments=True):
+        yield cmd_part
+
+        if '"' in cmd_part or "'" in cmd_part or " " in cmd_part:
+            yield from _recursive_shlex_split(cmd_part.strip("\"\''"))
+        
+
+def _parse_command(command: Union[str, list]) -> Optional[Tuple[str, List[str]]]:
     if isinstance(command, str):
         if not command.strip():
             # Empty commands are safe
             return None
-        parsed_command = shlex.split(_replace_IFS(command), comments=True)
+        
+        expanded_command = _shell_expand(command)
     elif isinstance(command, list):
         if not command or command == [""]:
             # Empty commands are safe
             return None
-        
-        # Join then split with shlex to process shell-like syntax correctly. 
-        parsed_command = shlex.split(_replace_IFS(shlex.join(command)), comments=True)
+
+        expanded_command = _shell_expand(" ".join(command))
     else:
         raise TypeError("Command must be a str or a list")
 
-    return parsed_command
+
+    parsed_command = list(_recursive_shlex_split(expanded_command))
+    return expanded_command, parsed_command
+
+
+def _path_is_executable(path: Path) -> bool:
+    return access(path, X_OK)
 
 
 def _resolve_executable_path(executable: str) -> Union[Path, None]:
-    if path := which(executable):
-        return Path(path).resolve()
+    if executable_path := which(executable):
+        return Path(executable_path).resolve()
 
-    # Check if the executable is in the system PATH
+    # Explicitly check if the executable is in the system PATH when which fails
     for path in get_exec_path():
-        if (executable_path := Path(path) / executable).exists():
+        if (executable_path := Path(path) / executable).exists() and _path_is_executable(executable_path):
             return executable_path.resolve()
-    
+
     return None
 
 
-def _resolve_paths_in_parsed_command(parsed_command: list) -> Tuple[set[Path], set[str]]:
+def _resolve_paths_in_parsed_command(parsed_command: List[str]) -> Tuple[Set[Path], Set[str]]:
     # Create Path objects and resolve symlinks then add to sets of Path and absolute path strings from the parsed commands
     # for comparison with the sensitive files common exploit executables and group/owner checks.
 
     abs_paths, abs_path_strings = set(), set()
-    # A second shlex split is done to handle shell-like syntax correctly when wrapped in quotes before globbing
-    cmd_parts = [cmd_part for cmd_arg in parsed_command for cmd_part in shlex.split(cmd_arg.strip("'\""))]
-    for cmd_part in cmd_parts:
+
+    for cmd_part in parsed_command:
         # check if the cmd_part is an executable and resolve the path
         if executable_path := _resolve_executable_path(cmd_part):
             abs_paths.add(executable_path)
             abs_path_strings.add(str(executable_path))
 
         # Handle any globbing characters and repeating slashes from the command and resolve symlinks to get absolute path
-        for path in glob(cmd_part, include_hidden=True, recursive=True): 
+        for path in iglob(cmd_part, recursive=True):
             path = Path(path)
 
-            # When its a symlink both the absolute path of the symlink 
+            # When its a symlink both the absolute path of the symlink
             # and the resolved path of its target are added to the sets
-            if path.is_symlink(): 
+            if path.is_symlink():
                 path = path.absolute()
                 abs_paths.add(path)
                 abs_path_strings.add(str(path))
-            
+
             abs_path = Path(path).resolve()
             abs_paths.add(abs_path)
             abs_path_strings.add(str(abs_path))
 
-            # Check if globbing returned an executable and add to the sets    
+            # Check if globbing and/or resolving symlinks returned an executable and add to the sets
             if executable_path := _resolve_executable_path(str(path)):
                 abs_paths.add(executable_path)
                 abs_path_strings.add(str(executable_path))
 
-            # Check if globbing returned a directory and add all files in the directory to the sets
+            # Check if globbing and/or resolving symlinks returned a directory and add all files in the directory to the sets
             if abs_path.is_dir():
                 for file in abs_path.rglob("*"):
                     file = file.resolve()
                     abs_paths.add(file)
                     abs_path_strings.add(str(file))
 
-
     return abs_paths, abs_path_strings
 
 
 def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
-    if not restrictions or (parsed_command := _parse_command(command)) is None:
-        # No restrictions or commands, no checks
+    if not restrictions:
+        # No restrictions no checks
         return None
     
+    expanded_command, parsed_command = _parse_command(command) or ("", [])
+    if not parsed_command:
+        # Empty commands are safe
+        return None
+
     executable = parsed_command[0]
     executable_path = _resolve_executable_path(executable)
 
     abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(parsed_command)
-    
+
     if "PREVENT_COMMAND_CHAINING" in restrictions:
-        check_multiple_commands(command, parsed_command)
+        check_multiple_commands(expanded_command, parsed_command)
 
     if "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES" in restrictions:
-        check_sensitive_files(command, abs_path_strings)
+        check_sensitive_files(expanded_command, abs_path_strings)
 
     if "PREVENT_COMMON_EXPLOIT_EXECUTABLES" in restrictions:
-        check_banned_executable(command, abs_path_strings)
+        check_banned_executable(expanded_command, abs_path_strings)
 
     for path in abs_paths:
         if "PREVENT_UNCOMMON_PATH_TYPES" in restrictions:
@@ -181,62 +299,60 @@ def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
                 check_file_group(path)
 
 
-def _do_check_multiple_commands(part: str) -> None:
-    if any(sep in part for sep in BANNED_COMMAND_CHAINING_SEPARATORS):
-        raise SecurityException(f"Multiple commands not allowed. Separators found.")
+def check_multiple_commands(expanded_command: str, parsed_command: List[str]) -> None:
+    # Since shlex.split removes newlines from the command, it would not be present in the parsed_command and
+    # must be checked for in the expanded command string 
+    if '\n' in expanded_command:
+        raise SecurityException(
+            "Multiple commands not allowed. Newline found.")
 
-    if any(sep in part for sep in BANNED_PROCESS_SUBSTITUTION_OPERATORS):
-        raise SecurityException(f"Multiple commands not allowed. Process substitution operators found.")
-
-    if part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES:
-        raise SecurityException(f"Multiple commands not allowed. Executable {part} allows command chaining.")
-
-
-def check_multiple_commands(command: ValidCommand, parsed_command: list) -> None:    
-    if isinstance(command, str):
-        _do_check_multiple_commands(command.strip())
-        
-    if isinstance(command, list):
-        for cmd_arg in command:
-            _do_check_multiple_commands(cmd_arg)
-
-    for cmd_arg in parsed_command:
-        _do_check_multiple_commands(cmd_arg)
-
-
-def check_sensitive_files(command: ValidCommand, abs_path_strings: set[str]) -> None:
-    for sensitive_path in SENSITIVE_FILE_NAMES:
-        if (sensitive_path in command 
-            or any(abs_path_string.endswith(sensitive_path) for abs_path_string in abs_path_strings)):
+    for cmd_part in parsed_command:
+        if any(seperator in cmd_part for seperator in BANNED_COMMAND_CHAINING_SEPARATORS):
             raise SecurityException(
-                "Disallowed access to sensitive file: " + sensitive_path)
+                f"Multiple commands not allowed. Separators found.")
+
+        if any(substitution_op in cmd_part for substitution_op in BANNED_PROCESS_SUBSTITUTION_OPERATORS):
+            raise SecurityException(
+                f"Multiple commands not allowed. Process substitution operators found.")
+
+        if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES:
+            raise SecurityException(
+                f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
 
 
-def check_banned_executable(command: ValidCommand, abs_path_strings: set[str]) -> None:
+def check_sensitive_files(expanded_command: str, abs_path_strings: Set[str]) -> None:
+    for sensitive_path in SENSITIVE_FILE_PATHS:
+        # First check the absolute path strings for the sensitive files
+        # Then handle edge cases when a sensitive file is part of a command but the path could not be resolved
+        if (
+            any(abs_path_string.endswith(sensitive_path)
+                for abs_path_string in abs_path_strings)
+            or sensitive_path in expanded_command
+        ):
+            raise SecurityException(
+                f"Disallowed access to sensitive file: {sensitive_path}")
+
+
+def check_banned_executable(expanded_command: str, abs_path_strings: Set[str]) -> None:
     for banned_executable in BANNED_EXECUTABLES:
-        if (any((abs_path_string.endswith(f"/{banned_executable}") for abs_path_string in abs_path_strings))
-            or (isinstance(command, str) 
-                and (command.startswith(f"{banned_executable} ") 
-                     or f"bin/{banned_executable}" in command 
-                     or f" {banned_executable} " in command )
-            )
-            or (isinstance(command, list) 
-                and any(
-                    (part.strip("'\"").startswith(f"{banned_executable} ")
-                    or f"bin/{banned_executable}" in part 
-                    or f" {banned_executable} " in part
-                    ) for part in command)
-                )
-            ):
+        # First check the absolute path strings for the banned executables
+        # Then handle edge cases when a banned executable is part of a command but the path could not be resolved
+        if (
+            any((abs_path_string.endswith(
+                f"/{banned_executable}") for abs_path_string in abs_path_strings))
+            or expanded_command.startswith(f"{banned_executable} ")
+            or f"bin/{banned_executable}" in expanded_command
+            or f" {banned_executable} " in expanded_command
+        ):
             raise SecurityException(
                 f"Disallowed command: {banned_executable}")
-
 
 
 def check_path_type(path: Path) -> None:
     for pathtype in BANNED_PATHTYPES:
         if getattr(path, f"is_{pathtype}")():
-            raise SecurityException(f"Disallowed access to path type {pathtype}: {path}")
+            raise SecurityException(
+                f"Disallowed access to path type {pathtype}: {path}")
 
 
 def check_file_owner(path: Path) -> None:
@@ -251,3 +367,5 @@ def check_file_group(path: Path) -> None:
     if group in BANNED_GROUPS:
         raise SecurityException(
             f"Disallowed access to file owned by {group}: {path}")
+
+
