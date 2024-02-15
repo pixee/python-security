@@ -45,7 +45,7 @@ class TestSafeCommandApi:
     def test_blocks_sensitive_files(self, command, original_func):
         with pytest.raises(SecurityException) as err:
             safe_command.run(original_func, command)
-        assert err.value.args[0] == "Disallowed access to sensitive file: %s"
+        assert err.value.args[0].startswith("Disallowed access to sensitive file")
 
     @mock.patch("security.safe_command.api._call_original")
     def test_no_restrictions(self, mock_call_original, original_func):
@@ -68,7 +68,7 @@ class TestSafeCommandApi:
     def test_blocks_command_chaining(self, command, original_func):
         with pytest.raises(SecurityException) as err:
             safe_command.run(original_func, command)
-        assert err.value.args[0] == "Multiple commands not allowed: %s"
+        assert err.value.args[0].startswith("Multiple commands not allowed")
 
     @pytest.mark.parametrize(
         "command",
@@ -81,4 +81,4 @@ class TestSafeCommandApi:
                 command,
                 restrictions=["PREVENT_COMMON_EXPLOIT_EXECUTABLES"],
             )
-        assert err.value.args[0] == "Disallowed command: %s"
+        assert err.value.args[0].startswith("Disallowed command")
