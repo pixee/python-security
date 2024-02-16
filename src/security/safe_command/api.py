@@ -40,7 +40,7 @@ BANNED_PATHTYPES = frozenset(
 BANNED_OWNERS = frozenset(("root", "admin", "wheel", "sudo"))
 BANNED_GROUPS = frozenset(("root", "admin", "wheel", "sudo"))
 BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n"))
-BANNED_PROCESS_SUBSTITUTION_OPERATORS = frozenset(("$(", "`", "<(", ">("))
+BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS = frozenset(("$(", "`", "<(", ">("))
 BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
     "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
     "bash", "sh", "zsh", "csh", "rsh", "tcsh", "ksh", "dash", "fish", "powershell", "pwsh", "pwsh-preview", "pwsh-lts",
@@ -50,10 +50,9 @@ BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
     "systemd", "systemd-run"
 ))
 
+ALLOWED_SHELL_EXPANSION_OPERATORS = frozenset(('-', '=', '?', '+'))
+BANNED_SHELL_EXPANSION_OPERATORS = frozenset(("!", "*", "@", "#", "%", "/", "^", ","))
 
-SHELL_VARIABLE_REGEX = re_compile(r'(\$[a-zA-Z_][a-zA-Z0-9_]*)')
-SHELL_EXPANSION_REGEX = re_compile(r'(([\$\S])*(\{[^{}]+?\})[^\s\$]*)')
-REDIRECTION_OPERATORS_REGEX = re_compile(r'(?!<\()(<<?<?[-&]?[-&p]?|(?:\d+|&)?>>?&?-?(?:\d+|\|)?|<>)')
 
 
 def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions = DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
@@ -78,88 +77,137 @@ def _get_env_var_value(var: str) -> str:
         return ""
 
 
+def _simple_shell_math(string: str) -> int:
+    # Handles arithmetic expansion of bracket paramters like ${HOME:1+1:5-2} == ${HOME:2:3}
+    # Only supports + - for now since * / % are banned shell expansion operators
+    value = 0
+    stack = []
+    string = string.strip().lstrip("+") # Leading spaces or + is allowed by shell but has no effect
+    if string.startswith("-"):
+        stack.append("-")
+        string = string[1:].lstrip("-") # More than one - is allowed by shell but has no effect different from one -
+
+    for char in string:
+        if char.isdigit() or char == ".":
+            stack.append(char)
+
+        elif char in "+-":
+            value += float(''.join(stack))
+            if char == "-":
+                stack = ["-"]
+            else:
+                stack = []
+    
+    if stack and stack != ["-"]:
+        value += float(''.join(stack))
+    elif string and (not stack or stack == ["-"]):
+        # If the last char is an operator this is invalid
+        # but an empty string is valid and returns 0
+        raise ValueError("Invalid arithmetic expansion")
+    
+    return int(value) # Floats can be used in shells but the value is truncated to an int
+ 
+
 def _shell_expand(command: str) -> str:
+    SHELL_VARIABLE_REGEX = re_compile(r'(\$[a-zA-Z_][a-zA-Z0-9_]*)')
+    SHELL_EXPANSION_REGEX = re_compile(r'(([\$\S])*(\{[^{}]+?\})[^\s\$]*)')
+    
     # Handles simple shell variable expansion like $HOME, $PWD, $IFS
     for match in SHELL_VARIABLE_REGEX.finditer(command):
         shell_var_str = match.group(0)
         var = shell_var_str[1:]
-        value = _get_env_var_value(var)       
-        
+        value = _get_env_var_value(var)
+
         # Explicitly set IFS to space if it is empty since IFS is not always returned by expandvars or getenv on all systems
         if var == "IFS" and not value:
-                value = " "
+            value = " "
 
         command = command.replace(shell_var_str, value)
 
-    # Handle Complex Parameter, Brace and Sequence shell expansions 
-    for match in SHELL_EXPANSION_REGEX.finditer(command):
+    # Handle Complex Parameter, Brace and Sequence shell expansions
+    while match := SHELL_EXPANSION_REGEX.search(command):
         full_expansion, prefix, brackets = match.groups()
         inside_brackets = brackets[1:-1]
-        
+
         if prefix == "$":
-            # Handles Parameter expansion like ${var:-defaultval}, ${var:=defaultval}, ${var:+defaultval}, ${var:?defaultval}
-            var, *expansion_params = inside_brackets.split(":")
+            # Handles Parameter expansion ${var:1:2}, ${var:1}, ${var:1:}, ${var:1:2:3} 
+            # and ${var:-defaultval}, ${var:=defaultval}, ${var:+defaultval}, ${var:?defaultval}
             
-            value, operation, default = "", "", ""
+            # Blocks ${!prefix*} ${!prefix@} ${!name[@]} ${!name[*]} ${#parameter} ${parameter#word} ${parameter##word}
+            # ${parameter/pattern/string} ${parameter%word} ${parameter%%word} ${parameter@operator}
+            for banned_expansion_operator in BANNED_SHELL_EXPANSION_OPERATORS:
+                if banned_expansion_operator in inside_brackets:
+                    raise SecurityException(
+                        f"Disallowed shell expansion operator: {banned_expansion_operator}")
+                
+            var, *expansion_params = inside_brackets.split(":")    
+
+            value, operator, default = "", "", ""
             start_slice, end_slice = None, None
             if expansion_params:
-                expansion_param_1 = expansion_params.pop(0)
-                first_char = expansion_param_1[0]
-                if first_char.isdigit() or (first_char == "-" and expansion_param_1[1:].isdigit()):
-                    start_slice = int(expansion_param_1)
-                    if expansion_params:
-                        expansion_param_2 = expansion_params[0]
-                        end_slice = int(expansion_param_2)
-                else:
-                    operation = first_char
-                    default = expansion_param_1[1:]
+                expansion_param_1 = expansion_params[0]
+                
+                # If the first char is empty or a digit or a space then it is a slice expansion
+                # like ${var:1:2}, ${var:1}, ${var:1:}, ${var:1:2:3} ${var: -1} ${var:1+1:5-2} ${var::}
+                if not expansion_param_1 or expansion_param_1[0].isdigit() or expansion_param_1[0] == " ":
+                    start_slice = _simple_shell_math(expansion_param_1)
+                    if len(expansion_params) > 1:
+                        expansion_param_2 = expansion_params[1]
+                        end_slice = _simple_shell_math(expansion_param_2)
+
+                elif (operator := expansion_param_1[0]) in ALLOWED_SHELL_EXPANSION_OPERATORS:
+                    # If the first char is a shell expansion operator then it is a default value expansion
+                    # like ${var:-defaultval}, ${var:=defaultval}, ${var:+defaultval}, ${var:?defaultval}
+                    default = ':'.join(expansion_params)[1:]
+
 
             value = _get_env_var_value(var)
             if start_slice is not None:
                 value = value[start_slice:end_slice]
-            elif not operation or operation == "?":
+            elif not operator or operator == "?":
                 value = value
-            elif operation in "-=":
+            elif operator in "-=":
                 value = value or default
-            elif operation == "+":
+            elif operator == "+":
                 value = default if value else ""
-            
+
             # Explicitly set IFS to space but only after checking for a default value
             if var == "IFS" and not value:
                 value = " "
 
             command = command.replace(f"${brackets}", value)
-            
+
         else:
             # Handles Brace and sequence expansion like {1..10..2}, {a,b,c}, {1..10}, {1..-1}
-            values = []           
-            if (',' not in inside_brackets 
-                and len(inside_params := inside_brackets.split('..')) in (2,3)
-                and all(param.isdigit() or param.startswith("-") for param in inside_params)
+            values = []
+            if (',' not in inside_brackets
+                    and len(inside_params := inside_brackets.split('..')) in (2, 3)
+                    and all(param.isdigit() or param.startswith("-") for param in inside_params)
                 ):
-                
+
                 # Sequence expansion
                 inside_params = list(map(int, inside_params))
                 if len(inside_params) == 2:
                     inside_params.append(1)
                 start, end, step = inside_params
-                
+
                 sequence = None
                 if start <= end and step > 0:
-                    sequence = range(start, end+1, step)   
+                    sequence = range(start, end+1, step)
                 elif start <= end and step < 0:
-                    sequence = range(end-1, start-1, step)   
+                    sequence = range(end-1, start-1, step)
                 elif start > end and step > 0:
-                    sequence = range(start, end-1, -step)   
+                    sequence = range(start, end-1, -step)
                 elif start > end and step < 0:
-                    sequence = reversed(range(start, end-1, step))   
+                    sequence = reversed(range(start, end-1, step))
 
                 if sequence:
                     for i in sequence:
                         values.append(full_expansion.replace(brackets, str(i)))
                 else:
-                    values.append(full_expansion.replace(brackets, inside_brackets))
-                
+                    values.append(full_expansion.replace(
+                        brackets, inside_brackets))
+
             else:
                 # Brace expansion
                 for var in inside_brackets.split(','):
@@ -168,15 +216,18 @@ def _shell_expand(command: str) -> str:
                         var_value = _get_env_var_value(var)
                     else:
                         var_value = var
-                    values.append(full_expansion.replace(brackets, var_value, 1))
-            
+                    values.append(full_expansion.replace(
+                        brackets, var_value, 1))
+
             value = ' '.join(values)
             command = command.replace(full_expansion, value)
 
     return command
 
 
-def _space_redirects(command: str) -> str:
+def _space_redirection_operators(command: str) -> str:
+    REDIRECTION_OPERATORS_REGEX = re_compile(
+    r'(?!<\()(<<?<?[-&]?[-&p]?|(?:\d+|&)?>>?&?-?(?:\d+|\|)?|<>)')
     # Space out redirect operators to avoid them being combined with the next or previous command part when splitting
     return REDIRECTION_OPERATORS_REGEX.sub(r' \1 ', command)
 
@@ -193,25 +244,25 @@ def _recursive_shlex_split(command: str) -> Iterator[str]:
 
         if '"' in cmd_part or "'" in cmd_part or " " in cmd_part:
             yield from _recursive_shlex_split(cmd_part)
-        
+
 
 def _parse_command(command: ValidCommand) -> Optional[Tuple[str, List[str]]]:
     if isinstance(command, str):
         if not command.strip():
             # Empty commands are safe
             return None
-        
+
         command_str = command
     elif isinstance(command, list):
         if not command or command == [""]:
             # Empty commands are safe
             return None
-        
+
         command_str = " ".join(command)
     else:
         raise TypeError("Command must be a str or a list")
 
-    spaced_command = _space_redirects(command_str)
+    spaced_command = _space_redirection_operators(command_str)
     expanded_command = _shell_expand(spaced_command)
     parsed_command = list(_recursive_shlex_split(expanded_command))
     return expanded_command, parsed_command
@@ -279,7 +330,7 @@ def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
     if not restrictions:
         # No restrictions no checks
         return None
-    
+
     expanded_command, parsed_command = _parse_command(command) or ("", [])
     if not parsed_command:
         # Empty commands are safe
@@ -288,7 +339,8 @@ def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
     executable = parsed_command[0]
     executable_path = _resolve_executable_path(executable)
 
-    abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(parsed_command)
+    abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(
+        parsed_command)
 
     if "PREVENT_COMMAND_CHAINING" in restrictions:
         check_multiple_commands(expanded_command, parsed_command)
@@ -314,7 +366,7 @@ def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
 
 def check_multiple_commands(expanded_command: str, parsed_command: List[str]) -> None:
     # Since shlex.split removes newlines from the command, it would not be present in the parsed_command and
-    # must be checked for in the expanded command string 
+    # must be checked for in the expanded command string
     if '\n' in expanded_command:
         raise SecurityException(
             "Multiple commands not allowed. Newline found.")
@@ -324,7 +376,7 @@ def check_multiple_commands(expanded_command: str, parsed_command: List[str]) ->
             raise SecurityException(
                 f"Multiple commands not allowed. Separators found.")
 
-        if any(substitution_op in cmd_part for substitution_op in BANNED_PROCESS_SUBSTITUTION_OPERATORS):
+        if any(substitution_op in cmd_part for substitution_op in BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS):
             raise SecurityException(
                 f"Multiple commands not allowed. Process substitution operators found.")
 
@@ -380,5 +432,3 @@ def check_file_group(path: Path) -> None:
     if group in BANNED_GROUPS:
         raise SecurityException(
             f"Disallowed access to file owned by {group}: {path}")
-
-

@@ -1,7 +1,7 @@
 import pytest
 import subprocess
 from pathlib import Path
-from os import mkfifo, symlink, remove
+from os import mkfifo, symlink, remove, getenv
 from shutil import rmtree, which
 
 from security import safe_command
@@ -146,76 +146,129 @@ class TestSafeCommandInternals:
         assert abs_paths == expected_paths
         assert abs_path_strings == {str(p) for p in expected_paths}
 
+
     @pytest.mark.parametrize(
         "string, expanded_str",
         [
-            ("echo $HOME", f"echo {str(Path.home())}"),
-            ("echo $PWD", f"echo {Path.cwd()}"),
-            ("echo $IFS", "echo  "),
+            ("$HOME", f"{str(Path.home())}"),
+            ("$PWD", f"{Path.cwd()}"),
+            ("$IFS", " "),
 
-            ("echo $HOME $PWD $IFS", f"echo {str(Path.home())} {Path.cwd()}  "),    
-            ("echo ${HOME} ${PWD} ${IFS}", f"echo {str(Path.home())} {Path.cwd()}  "),        
+            ("$HOME $PWD $IFS", f"{str(Path.home())} {Path.cwd()}  "),    
+            ("${HOME} ${PWD} ${IFS}", f"{str(Path.home())} {Path.cwd()}  "),        
 
-            ("echo ${IFS}", "echo  "),
-            ("echo ${IFS:0}", "echo  "),
-            ("echo ${IFS:0:1}", "echo  "),
-            ("echo ${IFS:4:20}", "echo  "),
-            ("echo ${HOME:4:20}", f"echo {str(Path.home())[4:20]}"),
-            ("echo ${HOME:4}", f"echo {str(Path.home())[4:]}"),
-            ("echo ${HOME:-1:-10}", f"echo {str(Path.home())[-1:10]}"),
+            ("${IFS}", " "),
+            ("${IFS:0}", " "),
+            ("${IFS:0:1}", " "),
+            ("${IFS:4:20}", " "),
+            ("${HOME:4:20}", f"{str(Path.home())[4:20]}"),
+            ("${HOME:4}", f"{str(Path.home())[4:]}"),
+            ("${HOME:1:-10}", f"{str(Path.home())[1:-10]}"),
+            ("${HOME::2}", f"{str(Path.home())[0:2]}"),
+            ("${HOME::}", f"{str(Path.home())[0:0]}"),
+            ("${HOME: -1:    -10}", f"{str(Path.home())[-1:-10]}"),            
+            ("${HOME:1+2+3-4:1.5+2.5+6-5.0}", f"{str(Path.home())[2:5]}"),
+
+            ("${BADKEY:-1}", "1"),
+            ("${BADKEY:-1:10}", "1:10"),
+
+            ("A${BADKEY:0:10}B", "AB"),
+            ("A${BADKEY:-}B", "AB"),
+            ("A${BADKEY:- }B", "A B"),
             
-            ("echo ${HOME:-defaultval}", f"echo {str(Path.home())}"),
-            ("echo ${HOME:=defaultval}", f"echo {str(Path.home())}"),
-            ("echo ${HOME:+defaultval}", "echo defaultval"),
+            ("${HOME:-defaultval}", f"{str(Path.home())}"),
+            ("${HOME:=defaultval}", f"{str(Path.home())}"),
+            ("${HOME:+defaultval}", "defaultval"),
 
-            ("echo ${BADKEY:-defaultval}", "echo defaultval"),
-            ("echo ${BADKEY:=defaultval}", "echo defaultval"),
-            ("echo ${BADKEY:+defaultval}", "echo "),
-            ("echo ${BADKEY:0:2}", "echo "),
+            ("${BADKEY:-defaultval}", "defaultval"),
+            ("${BADKEY:=defaultval}", "defaultval"),
+            ("${BADKEY:+defaultval}", ""),
+            ("${BADKEY:0:2}", ""),
 
-            ("echo a{d,c,b}e", "echo ade ace abe"),
-            ("echo a{'d',\"c\",b}e", "echo ade ace abe"),
-            ("echo a{$HOME,$PWD,$IFS}e", f"echo a{str(Path.home())}e a{Path.cwd()}e a e"),
+            ("${BADKEY:-$USER}", f"{getenv('USER')}"),
+            ("${BADKEY:-${USER}}" , f"{getenv('USER')}"),
+            ("${BADKEY:-${BADKEY:-${USER}}}", f"{getenv('USER')}"),
+
+            ("a{d,c,b}e", "ade ace abe"),
+            ("a{'d',\"c\",b}e", "ade ace abe"),
+            ("a{$HOME,$PWD,$IFS}e", f"a{str(Path.home())}e a{Path.cwd()}e a e"),
             
-            ("echo {1..-1}", "echo 1 0 -1"),
-            ("echo {1..1}", "echo 1"),
-            ("echo {1..4}", "echo 1 2 3 4"),
+            ("{1..-1}", "1 0 -1"),
+            ("{1..1}", "1"),
+            ("{1..4}", "1 2 3 4"),
 
-            ("echo {1..10..2}", "echo 1 3 5 7 9"),
-            ("echo {1..10..-2}", "echo 9 7 5 3 1"),
-            ("echo {10..1..2}", "echo 10 8 6 4 2"),
-            ("echo {10..1..-2}", "echo 2 4 6 8 10"),
+            ("{1..10..2}", "1 3 5 7 9"),
+            ("{1..10..-2}", "9 7 5 3 1"),
+            ("{10..1..2}", "10 8 6 4 2"),
+            ("{10..1..-2}", "2 4 6 8 10"),
 
-            ("echo {-1..10..2}", "echo -1 1 3 5 7 9"),
-            ("echo {-1..10..-2}", "echo 9 7 5 3 1 -1"),
-            ("echo {10..-1..2}", "echo 10 8 6 4 2 0"),
-            ("echo {10..-1..-2}", "echo 0 2 4 6 8 10"),
+            ("{-1..10..2}", "-1 1 3 5 7 9"),
+            ("{-1..10..-2}", "9 7 5 3 1 -1"),
+            ("{10..-1..2}", "10 8 6 4 2 0"),
+            ("{10..-1..-2}", "0 2 4 6 8 10"),
 
-            ("echo {1..-10..2}", "echo 1 -1 -3 -5 -7 -9"),
-            ("echo {1..-10..-2}", "echo -9 -7 -5 -3 -1 1"),
-            ("echo {-10..1..2}", "echo -10 -8 -6 -4 -2 0"),
-            ("echo {-10..1..-2}", "echo 0 -2 -4 -6 -8 -10"),
+            ("{1..-10..2}", "1 -1 -3 -5 -7 -9"),
+            ("{1..-10..-2}", "-9 -7 -5 -3 -1 1"),
+            ("{-10..1..2}", "-10 -8 -6 -4 -2 0"),
+            ("{-10..1..-2}", "0 -2 -4 -6 -8 -10"),
 
-            ("echo {-1..-10..2}", "echo -1 -3 -5 -7 -9"),
-            ("echo {-1..-10..-2}", "echo -9 -7 -5 -3 -1"),
-            ("echo {-10..-1..2}", "echo -10 -8 -6 -4 -2"),
-            ("echo {-10..-1..-2}", "echo -2 -4 -6 -8 -10"),
-            ("echo {10..-10..2}", "echo 10 8 6 4 2 0 -2 -4 -6 -8 -10"),
-            ("echo {10..-10..-2}", "echo -10 -8 -6 -4 -2 0 2 4 6 8 10"),
+            ("{-1..-10..2}", "-1 -3 -5 -7 -9"),
+            ("{-1..-10..-2}", "-9 -7 -5 -3 -1"),
+            ("{-10..-1..2}", "-10 -8 -6 -4 -2"),
+            ("{-10..-1..-2}", "-2 -4 -6 -8 -10"),
+            ("{10..-10..2}", "10 8 6 4 2 0 -2 -4 -6 -8 -10"),
+            ("{10..-10..-2}", "-10 -8 -6 -4 -2 0 2 4 6 8 10"),
             
-            ("echo {1..10..0}", "echo 1..10..0"),
-            ("echo AB{1..10..0}CD", "echo AB1..10..0CD"),
-            ("echo AB{1..$HOME}CD", f"echo AB1..{str(Path.home())}CD"),
+            ("{1..10..0}", "1..10..0"),
+            ("AB{1..10..0}CD", "AB1..10..0CD"),
+            ("AB{1..$HOME}CD", f"AB1..{str(Path.home())}CD"),
 
-            ("echo a{1..4}e", "echo a1e a2e a3e a4e"),
-            ("echo AB{1..10..2}CD {$HOME,$PWD} ${BADKEY:-defaultval}", f"echo AB1CD AB3CD AB5CD AB7CD AB9CD {str(Path.home())} {Path.cwd()} defaultval"),
-            ("echo AB{1..4}CD", "echo AB1CD AB2CD AB3CD AB4CD"),
+            ("a{1..4}e", "a1e a2e a3e a4e"),
+            ("AB{1..10..2}CD {$HOME,$PWD} ${BADKEY:-defaultval}", f"AB1CD AB3CD AB5CD AB7CD AB9CD {str(Path.home())} {Path.cwd()} defaultval"),
+            ("AB{1..4}CD", "AB1CD AB2CD AB3CD AB4CD"),
 
             ("find . -name '*.txt' ${BADKEY:--exec} cat {} + ", "find . -name '*.txt' -exec cat {} + "),
         ]
     )
-    def test_shell_expansions(self, string, expanded_str, setup_teardown):
+    def test_shell_expansions(self, string, expanded_str):
         assert _shell_expand(string) == expanded_str
+
+
+    @pytest.mark.parametrize(
+        "string",
+        [
+            "${!prefix*}",
+            "${!prefix@}",
+            "${!name[@]}",
+            "${!name[*]}",
+            "${#parameter}",
+            "${parameter#word}",
+            "${parameter##word}",
+            "${parameter%word}",
+            "${parameter%%word}",
+            "${parameter/pattern/string}",
+            "${parameter//pattern/string}",
+            "${parameter/#pattern/string}",
+            "${parameter/%pattern/string}",
+            "${parameter^pattern}",
+            "${parameter^^pattern}",
+            "${parameter,pattern}",
+            "${parameter,,pattern}",
+            "${parameter@operator}",
+
+            # All these should be blocked because evaluation of nested expansions 
+            # returns a / which is a banned expansion operator
+            "${BADKEY:-$HOME}",
+            "${BADKEY:-${HOME}}" ,
+            "${BADKEY:-${BADKEY:-${HOME}}}",
+
+        ]
+    )
+    def test_banned_shell_expansion(self, string):
+        with pytest.raises(SecurityException) as cm:
+            _shell_expand(string)
+            print(string)
+        assert cm.value.args[0].startswith("Disallowed shell expansion")
 
 
 @pytest.mark.parametrize("original_func", [subprocess.run, subprocess.call])
@@ -501,7 +554,7 @@ class TestSafeCommandRestrictions:
             "/etc/passwd",
             "/etc/passwd*",
             "/etc/pass*d",
-            "*etc/pass*d",
+            "*/etc/pass*d",
             "/et**/pa*sswd",
             
             "etc/passwd",
@@ -531,7 +584,7 @@ class TestSafeCommandRestrictions:
                     shell=True, 
                     **popen_kwargs 
             )
-            # Anything that is allowed to run is a junk path that does resolve to /etc/passwd
+            # Anything that is allowed to run is a junk path that does not resolve to /etc/passwd
             # and should thus not be blocked by PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES
             if original_func.__name__ == "run":
                 assert "root:" not in result.stdout 
@@ -543,3 +596,4 @@ class TestSafeCommandRestrictions:
             elif isinstance(e, OSError):
                 assert e.strerror == "File name too long"
         
+
