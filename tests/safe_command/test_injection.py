@@ -150,13 +150,14 @@ class TestSafeCommandInternals:
     @pytest.mark.parametrize(
         "string, expanded_str",
         [
+            # Simple variable expansions
             ("$HOME", f"{str(Path.home())}"),
             ("$PWD", f"{Path.cwd()}"),
             ("$IFS", " "),
-
             ("$HOME $PWD $IFS", f"{str(Path.home())} {Path.cwd()}  "),    
             ("${HOME} ${PWD} ${IFS}", f"{str(Path.home())} {Path.cwd()}  "),        
 
+            # Slice expansions
             ("${IFS}", " "),
             ("${IFS:0}", " "),
             ("${IFS:0:1}", " "),
@@ -168,31 +169,44 @@ class TestSafeCommandInternals:
             ("${HOME::}", f"{str(Path.home())[0:0]}"),
             ("${HOME: -1:    -10}", f"{str(Path.home())[-1:-10]}"),            
             ("${HOME:1+2+3-4:1.5+2.5+6-5.0}", f"{str(Path.home())[2:5]}"),
+            ("${BADKEY:0:2}", ""),
 
+            # Default value expansions that look like slice expansions
             ("${BADKEY:-1}", "1"),
             ("${BADKEY:-1:10}", "1:10"),
-
             ("A${BADKEY:0:10}B", "AB"),
             ("A${BADKEY:-}B", "AB"),
             ("A${BADKEY:- }B", "A B"),
-            
+
+            # Default value expansions
             ("${HOME:-defaultval}", f"{str(Path.home())}"),
             ("${HOME:=defaultval}", f"{str(Path.home())}"),
             ("${HOME:+defaultval}", "defaultval"),
-
             ("${BADKEY:-defaultval}", "defaultval"),
             ("${BADKEY:=defaultval}", "defaultval"),
             ("${BADKEY:+defaultval}", ""),
-            ("${BADKEY:0:2}", ""),
-
             ("${BADKEY:-$USER}", f"{getenv('USER')}"),
+            # Nested default value expansions
             ("${BADKEY:-${USER}}" , f"{getenv('USER')}"),
             ("${BADKEY:-${BADKEY:-${USER}}}", f"{getenv('USER')}"),
 
+            # Values set during expansions should be used
+            ("${BADKEY:=setval} $BADKEY ${BADKEY:=unused}", "setval setval setval"),
+            ("${BADKEY:=cu} ${BADKEY2:=rl} ${BADKEY}${BADKEY2}", "cu rl curl"),
+            ("${BADKEY:=0} ${BADKEY2:=10} ${HOME:BADKEY:BADKEY2}", f"0 10 {str(Path.home())[0:10]}"),
+            ("${BADKEY:=5} ${BADKEY2:=10} ${HOME: BADKEY + BADKEY2 - 10: BADKEY2 - 3 }", f"5 10 {str(Path.home())[5:7]}"),
+            ("${BADKEY:=5} ${BADKEY2:=10} ${HOME: $BADKEY + ${BADKEY2} - 10: BADKEY2 - 3 }", f"5 10 {str(Path.home())[5:7]}"),
+            ("${HOME: BADKEY=5: BADKEY+BADKEY}", f"{str(Path.home())[5:10]}"),
+            ("${HOME: BADKEY=5: BADKEY+=5 } $BADKEY", f"{str(Path.home())[5:10]} 10"),
+            ("${HOME: BADKEY=1+2+3 : BADKEY2=BADKEY+4 } $BADKEY $BADKEY2", f"{str(Path.home())[6:10]} 6 10"),
+            ("${HOME: BADKEY=5+6-1-5 : BADKEY2=BADKEY+5 } ${BADKEY} ${BADKEY2}", f"{str(Path.home())[5:10]} 5 10"),
+            
+            # Brace expansions
             ("a{d,c,b}e", "ade ace abe"),
             ("a{'d',\"c\",b}e", "ade ace abe"),
             ("a{$HOME,$PWD,$IFS}e", f"a{str(Path.home())}e a{Path.cwd()}e a e"),
             
+            # Int Sequence expansions
             ("{1..-1}", "1 0 -1"),
             ("{1..1}", "1"),
             ("{1..4}", "1 2 3 4"),
@@ -218,15 +232,37 @@ class TestSafeCommandInternals:
             ("{-10..-1..-2}", "-2 -4 -6 -8 -10"),
             ("{10..-10..2}", "10 8 6 4 2 0 -2 -4 -6 -8 -10"),
             ("{10..-10..-2}", "-10 -8 -6 -4 -2 0 2 4 6 8 10"),
-            
+
+            # Step of 0 should not expand but should remove the brackets
             ("{1..10..0}", "1..10..0"),
             ("AB{1..10..0}CD", "AB1..10..0CD"),
-            ("AB{1..$HOME}CD", f"AB1..{str(Path.home())}CD"),
 
+            # Character Sequence expansions
+            ("{a..z}", "a b c d e f g h i j k l m n o p q r s t u v w x y z"),
+            ("{a..d}", "a b c d"),
+            ("{a..Z}", "a ` _ ^ ] \\ [ Z"),
+            ("{A..z}", "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z [ \\ ] ^ _ ` a b c d e f g h i j k l m n o p q r s t u v w x y z"),
+            ("{A..D}", "A B C D"),
+            ("{z..a}", "z y x w v u t s r q p o n m l k j i h g f e d c b a"),
+            ("{Z..a}", "Z [ \\ ] ^ _ ` a"),
+            ("{0..Z}", "0 1 2 3 4 5 6 7 8 9 : ; < = > ? @ A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"),
+            ("{0..z}", "0 1 2 3 4 5 6 7 8 9 : ; < = > ? @ A B C D E F G H I J K L M N O P Q R S T U V W X Y Z [ \\ ] ^ _ ` a b c d e f g h i j k l m n o p q r s t u v w x y z"),
+            ("{a..1}", "a ` _ ^ ] \\ [ Z Y X W V U T S R Q P O N M L K J I H G F E D C B A @ ? > = < ; : 9 8 7 6 5 4 3 2 1"),
+
+            # Character Sequence expansions with step should be returned as is
+            ("{a..z..2}", "{a..z..2}"),
+            
+            # Expansions that increase number of words            
             ("a{1..4}e", "a1e a2e a3e a4e"),
             ("AB{1..10..2}CD {$HOME,$PWD} ${BADKEY:-defaultval}", f"AB1CD AB3CD AB5CD AB7CD AB9CD {str(Path.home())} {Path.cwd()} defaultval"),
             ("AB{1..4}CD", "AB1CD AB2CD AB3CD AB4CD"),
 
+            #Invalid expansions should not be expanded
+            ("AB{1..$HOME}CD", f"AB{'{'}1..{str(Path.home())}{'}'}CD"),
+            ("{1..--1}", "{1..--1}"),
+            ("{Z..a..2}", "{Z..a..2}"),
+
+            # With a '-' in the expansion defaultval
             ("find . -name '*.txt' ${BADKEY:--exec} cat {} + ", "find . -name '*.txt' -exec cat {} + "),
         ]
     )
@@ -237,6 +273,7 @@ class TestSafeCommandInternals:
     @pytest.mark.parametrize(
         "string",
         [
+            # These should be blocked because they are banned expansions
             "${!prefix*}",
             "${!prefix@}",
             "${!name[@]}",
@@ -261,14 +298,29 @@ class TestSafeCommandInternals:
             "${BADKEY:-$HOME}",
             "${BADKEY:-${HOME}}" ,
             "${BADKEY:-${BADKEY:-${HOME}}}",
+            # Same as previous but with @ and ^ in the nested expansion
+            "${BADKEY:-{a..1}}",
+            "${BADKEY:-{a..Z}}",
+
+            # These should be blocked because they are invalid arithmetic expansions
+            "${HOME:1-}",
+            "${HOME:1+}",
+            "${HOME: -}",
+            "${HOME: +}",
+            "${HOME:1+2+3-}",
+            "${HOME:1+2+3+}",
+            "${HOME:V=}",
+            "${HOME: V= }",
+            "${HOME:V=1=}",
 
         ]
     )
     def test_banned_shell_expansion(self, string):
         with pytest.raises(SecurityException) as cm:
             _shell_expand(string)
-            print(string)
-        assert cm.value.args[0].startswith("Disallowed shell expansion")
+        
+        error_msg = cm.value.args[0]
+        assert error_msg.startswith("Disallowed shell expansion") or error_msg.startswith("Invalid arithmetic in shell expansion")
 
 
 @pytest.mark.parametrize("original_func", [subprocess.run, subprocess.call])
@@ -328,9 +380,17 @@ class TestSafeCommandRestrictions:
             "ls -l\nwhoami",
             "ls -l & whoami",
             "echo $(whoami)",
-            "echo $(whoami)",
             "echo `whoami`",
             "cat <(whoami)",
+            "cat <<(whoami)",
+            "cat < <(whoami)",
+            "echo 'whoami' > >(sh)",
+            "echo 'whoami' >> >(sh)",
+            "echo 'whoami' >>(sh)",
+            "echo 'whoami' >>>(sh)",
+            ">(sh <<<whoami)",
+            "sh<<<>(cat<<<whoami)",
+            "sh<><(whoami)",
             "sh -c 'whoami'",
             "find . -name '*.txt' -exec cat {} + ",
             "find . -name '*.txt' ${BADKEY:--exec} cat {} + ",
@@ -345,6 +405,15 @@ class TestSafeCommandRestrictions:
             ["echo", "$(whoami)"],
             ["echo", "`whoami`"],
             ["cat", "<(whoami)"],
+            ["cat", "<<(whoami)"],
+            ["cat", "<", "<(whoami)"],
+            ["echo", "'whoami'", ">", ">(sh)"],
+            ["echo", "'whoami'", ">>", ">(sh)"],
+            ["echo", "'whoami'", ">>(sh)"],
+            ["echo", "'whoami'", ">>>(sh)"],
+            [">(sh", "<<<whoami)"],
+            ["sh<<<>(cat<<<whoami)"],
+            ["sh<><(whoami)"],
             ["sh", "-c", "'whoami'"],
             ["find", ".", "-name", "'*.txt'", "-exec", "cat", "{}", "+"],
             ["find", ".", "-name", "'*.txt'", "${BADKEY:--exec}", "cat", "{}", "+"],    
@@ -366,8 +435,9 @@ class TestSafeCommandRestrictions:
             "cat /etc/pa*sswd",
             "cat /etc///pa*sswd*",
             "cat /etc/sudoers",
-            "cat ../../../../../../../../../../etc/sudoers.d/../sudoers",
+            "cat ../../../../../../../../../../../../../../../../../../../../etc/sudoers.d/../sudoers",
             "cat /etc/sudoers.d/../sudoers",
+            "cat ~/../../../../../../../../../../../../../../../../../../etc/p*sswd",
 
             ["cat", "/etc/shadow"],
             ["cat", "/etc/passwd"],
@@ -379,6 +449,7 @@ class TestSafeCommandRestrictions:
             ["cat", "/etc/sudoers"],
             ["cat", "../../../../../../../../../../etc/sudoers.d/../sudoers"],
             ["cat", "/etc/sudoers.d/../sudoers"],
+            ["cat", "~/../../../../../../../../../../../../../../../../../../etc/p*sswd"],
         ] 
     )            
     def test_check_sensitive_files(self, command, original_func, setup_teardown):
@@ -411,6 +482,8 @@ class TestSafeCommandRestrictions:
             "${BADKEY:-nc} -l -p 1234",
             # Check that IFS can't be used to bypass
             "${IFS}nc${IFS}-l${IFS}-p${IFS}1234",
+            "${BADKEY:-$IFS}nc${BADKEY:-$IFS}-l${BADKEY:-$IFS}-p${BADKEY:-$IFS}1234",
+            "${BADKEY:-nc} ${BADKEY:--l} ${BADKEY:--p} ${BADKEY:-1234}",
             "${IFS}/usr/bin/nc*${IFS} -l -p 1234",
             "$IFS            nc${IFS}-l -p 1234",
             "find . -name '*' -exec \"${IFS}/usr/bin/cu*l${IFS}\" {} + ",
@@ -438,6 +511,8 @@ class TestSafeCommandRestrictions:
             ["{nc,-l,-p,1234}"],
 
             ["${IFS}nc${IFS}-l${IFS}-p${IFS}1234"], 
+            ["${BADKEY:-$IFS}nc${BADKEY:-$IFS}-l${BADKEY:-$IFS}-p${BADKEY:-$IFS}1234"],
+            ["${BADKEY:-nc}", "${BADKEY:--l}", "${BADKEY:--p}", "${BADKEY:-1234}"],
             ["${IFS}/usr/bin/nc*${IFS}", "-l", "-p", "1234"],
             ["$IFS            nc${IFS}", "-p", "1234"],
             ["find", ".", "-name", "'*'", "-exec", "\"${IFS}/usr/bin/cu*l${IFS}\"", "{}", "+"],
