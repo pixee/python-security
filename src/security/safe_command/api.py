@@ -2,7 +2,7 @@ import shlex
 from re import compile as re_compile
 from pathlib import Path
 from glob import iglob
-from os import getenv, get_exec_path, access, X_OK
+from os import getenv, get_exec_path, environ, access, X_OK
 from os.path import expanduser, expandvars
 from shutil import which
 from subprocess import CompletedProcess
@@ -44,12 +44,13 @@ BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS = frozenset(
     ("$(", "`", "<(", ">("))
 BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
     "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
-    "bash", "sh", "zsh", "csh", "rsh", "tcsh", "ksh", "dash", "fish", "powershell", "pwsh", "pwsh-preview", "pwsh-lts",
-    "xargs", "awk", "perl", "python", "ruby", "php", "lua", "tclsh", "sqlplus",
+    "xargs", "awk", "perl", "python", "ruby", "php", "lua", "sqlplus",
     "expect", "screen", "tmux", "byobu", "byobu-ugraph", "time",
     "nohup", "at", "batch", "anacron", "cron", "crontab", "systemctl", "service", "init", "telinit",
     "systemd", "systemd-run"
 ))
+COMMON_SHELLS = frozenset(("sh", "bash", "zsh", "csh", "rsh", "tcsh", "tclsh", "ksh", "dash", "ash",
+                          "jsh", "jcsh", "mksh", "wsh", "fish", "busybox", "powershell", "pwsh", "pwsh-preview", "pwsh-lts"))
 
 ALLOWED_SHELL_EXPANSION_OPERATORS = frozenset(('-', '=', '?', '+'))
 BANNED_SHELL_EXPANSION_OPERATORS = frozenset(
@@ -58,7 +59,7 @@ BANNED_SHELL_EXPANSION_OPERATORS = frozenset(
 
 def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions = DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
     # If there is a command and it passes the checks pass it the original function call
-    check(command, restrictions)
+    check(command, restrictions, **kwargs)
     return _call_original(original_func, command, *args, **kwargs)
 
 
@@ -69,12 +70,18 @@ def _call_original(original_func: Callable, command: ValidCommand, *args, **kwar
     return original_func(command, *args, **kwargs)
 
 
-def _get_env_var_value(var: str) -> str:
+def _get_env_var_value(var: str, venv: Optional[dict] = None, default: Optional[str] = None) -> str:
     """
-    Try to get the value of the environment variable var. 
-    First with os.getenv then with os.path.expandvars.
+    Try to get the value of the environment variable var.
+    First check the venv if it is provided and the variable is set. 
+    then check for a value with os.getenv then with os.path.expandvars.
     Returns an empty string if the variable is not set.
     """
+
+    # Use the venv if it is provided and the variable is set, even when it is an empty string
+    if venv and (value := venv.get(var)) is not None:
+        return value
+
     # Try os.getenv first
     if (value := getenv(var)):
         return value
@@ -85,7 +92,7 @@ def _get_env_var_value(var: str) -> str:
     if (value := expandvars(var)) != var:
         return value
     else:
-        return ""
+        return default or ""
 
 
 def _strip_quotes(string: str) -> str:
@@ -109,7 +116,7 @@ def _replace_all(string: str, replacements: dict, reverse=False) -> str:
     return string
 
 
-def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operator: str='+') -> int:
+def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operator: str = '+') -> int:
     """
     Handles arithmetic expansion of bracket paramters like ${HOME:1+1:5-2} == ${HOME:2:3}
     Only supports + - for now since * / % are banned shell expansion operators
@@ -133,7 +140,7 @@ def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operat
     def evaluate_stack(stack: list, venv: dict) -> float:
         if not stack:
             return 0
-        
+
         # Join items in the stack to form a string for evaluation
         stack_str = ''.join(stack)
 
@@ -148,12 +155,12 @@ def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operat
             if var.startswith("{") and var.endswith("}"):
                 var = var[1:-1]
 
-        value = venv.get(var) or _get_env_var_value(var) or "0"
+        # Unset vars and vars set to empty strings are treated as 0
+        value = _get_env_var_value(var, venv, default="0")
         if is_valid_shell_number(value):
             return float(value)
         else:
             raise ValueError("Invalid arithmetic expansion")
-
 
     # Main function body
     value = 0
@@ -164,13 +171,13 @@ def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operat
         # Whitespace is ignored when evaluating the expression
         expression = expression.replace(' ', "").replace(
             "\t", "").replace("\n", "")
-        
+
         # Raise an error if the last char in the expression is an operator
         last_char = expression[-1] if expression else ""
         if last_char and (is_operator(last_char) or is_assignment_operator(last_char)):
             raise ValueError(
                 f"Invalid arithmetic expansion. operand expected (error token is '{last_char}')")
-        
+
         if expression.startswith("-"):
             operator = "-"
             # More than one leading - is allowed by shell but has no effect different from one -
@@ -236,7 +243,6 @@ def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operat
             # Add the char to the stack if not added during the lookahead
             stack.append(char)
 
-
     # Evaluate what is left in the stack after the iterator is exhausted
     stack_value = evaluate_stack(stack, venv)
     if operator == "-":
@@ -247,7 +253,7 @@ def _simple_shell_math(expression: Union[str, Iterator[str]], venv: dict, operat
     return int(value)
 
 
-def _shell_expand(command: str) -> str:
+def _shell_expand(command: str, venv: Optional[dict] = None) -> str:
     """
     Expand shell variables and shell expansions in the command string.
     Implementation is based on Bash expansion rules: 
@@ -261,7 +267,11 @@ def _shell_expand(command: str) -> str:
 
     # To store {placeholder : invalid_match} pairs to reinsert after the loop
     invalid_matches = {}
-    venv = {}  # To store env vars set during expansion
+    venv = venv or {}  # To store env vars set during expansion
+    if "IFS" not in venv:
+        # Set the default IFS to space if it is not set explicitly in the environment
+        # since it is not always returned correctly by os.getenv or os.path.expandvars on all systems
+        venv["IFS"] = _get_env_var_value("IFS", venv, default=" ")
 
     while (match := (PARAM_EXPANSION_REGEX.search(command) or BRACE_EXPANSION_REGEX.search(command))):
         full_expansion, content = match.groups()
@@ -298,7 +308,6 @@ def _shell_expand(command: str) -> str:
                             end_slice = _simple_shell_math(
                                 expansion_param_2, venv)
                     except ValueError as e:
-                        # start_slice, end_slice = 0, 0 # If the arithmetic expansion fails the slice is set to 0:0 so an empty string is returned
                         raise SecurityException(
                             f"Invalid arithmetic in shell expansion: {e}")
 
@@ -307,7 +316,7 @@ def _shell_expand(command: str) -> str:
                     # like ${var:-defaultval}, ${var:=defaultval}, ${var:+defaultval}, ${var:?defaultval}
                     default = ':'.join(expansion_params)[1:]
 
-            value = venv.get(var) or _get_env_var_value(var)
+            value = _get_env_var_value(var, venv, default="")
             if start_slice is not None:
                 value = value[start_slice:end_slice]
             elif not operator or operator == "?":
@@ -319,11 +328,6 @@ def _shell_expand(command: str) -> str:
                     venv[var] = value
             elif operator == "+":
                 value = default if value else ""
-
-            # Explicitly set IFS to space but only after checking for a default value
-            # since IFS is not always returned by getenv or expandvars on all systems
-            if var == "IFS" and not value:
-                value = " "
 
             command = command.replace(full_expansion, value, 1)
 
@@ -388,8 +392,8 @@ def _shell_expand(command: str) -> str:
                         content, format_fn(i), 1) for i in sequence)
 
                 else:
-                    # Replace invalid expansion to prevent infinite loop (from matching again) and store the full expansion to reinsert after the loop
-                    placeholder = str(hash(full_expansion))
+                    # Replace invalid expansion to prevent infinite loop (from matching again) and store the content to reinsert after the loop
+                    placeholder = str(hash(content))
                     invalid_matches[placeholder] = content
                     values.append(full_expansion.replace(content, placeholder))
 
@@ -427,7 +431,7 @@ def _recursive_shlex_split(command: str) -> Iterator[str]:
             yield from _recursive_shlex_split(cmd_part)
 
 
-def _parse_command(command: ValidCommand) -> Tuple[str, List[str]]:
+def _parse_command(command: ValidCommand, venv: Optional[dict] = None, shell: Optional[bool] = True) -> Tuple[str, List[str]]:
     """
     Expands the shell exspansions in the command then parses the expanded command into a list of command parts.
     """
@@ -443,7 +447,8 @@ def _parse_command(command: ValidCommand) -> Tuple[str, List[str]]:
         return ("", [])
 
     spaced_command = _space_redirection_operators(command_str)
-    expanded_command = _shell_expand(spaced_command)
+    expanded_command = _shell_expand(
+        spaced_command, venv) if shell else spaced_command
     parsed_command = list(_recursive_shlex_split(expanded_command))
     return expanded_command, parsed_command
 
@@ -452,22 +457,25 @@ def _path_is_executable(path: Path) -> bool:
     return access(path, X_OK)
 
 
-def _resolve_executable_path(executable: str) -> Union[Path, None]:
+def _resolve_executable_path(executable: Optional[str], venv: Optional[dict] = None) -> Optional[Path]:
     """
     Try to resolve the path of the executable using the which command and the system PATH.
     """
-    if executable_path := which(executable):
+    if not executable:
+        return None  # Return None if the executable is not set so does not resolve to /usr/local/bin
+
+    if executable_path := which(executable, path=venv.get("PATH") if venv is not None else None):
         return Path(executable_path).resolve()
 
-    # Explicitly check if the executable is in the system PATH when which fails
-    for path in get_exec_path():
+    # Explicitly check if the executable is in the system PATH or absolute when which fails
+    for path in [""] + get_exec_path(env=venv if venv is not None else None):
         if (executable_path := Path(path) / executable).exists() and _path_is_executable(executable_path):
             return executable_path.resolve()
 
     return None
 
 
-def _resolve_paths_in_parsed_command(parsed_command: List[str]) -> Tuple[Set[Path], Set[str]]:
+def _resolve_paths_in_parsed_command(parsed_command: List[str], venv: Optional[dict] = None) -> Tuple[Set[Path], Set[str]]:
     """
     Create Path objects from the parsed commands and resolve symlinks then add to sets of unique Paths 
     and absolute path strings for comparison with the sensitive files, common exploit executables and group/owner checks.
@@ -482,7 +490,7 @@ def _resolve_paths_in_parsed_command(parsed_command: List[str]) -> Tuple[Set[Pat
             cmd_part = expanduser(cmd_part)
 
         # Check if the cmd_part is an executable and resolve the path
-        if executable_path := _resolve_executable_path(cmd_part):
+        if executable_path := _resolve_executable_path(cmd_part, venv):
             abs_paths.add(executable_path)
             abs_path_strings.add(str(executable_path))
 
@@ -502,7 +510,7 @@ def _resolve_paths_in_parsed_command(parsed_command: List[str]) -> Tuple[Set[Pat
             abs_path_strings.add(str(abs_path))
 
             # Check if globbing and/or resolving symlinks returned an executable and add to the sets
-            if executable_path := _resolve_executable_path(str(path)):
+            if executable_path := _resolve_executable_path(str(path), venv):
                 abs_paths.add(executable_path)
                 abs_path_strings.add(str(executable_path))
 
@@ -516,21 +524,30 @@ def _resolve_paths_in_parsed_command(parsed_command: List[str]) -> Tuple[Set[Pat
     return abs_paths, abs_path_strings
 
 
-def check(command: ValidCommand, restrictions: ValidRestrictions) -> None:
+def check(command: ValidCommand, restrictions: ValidRestrictions, **kwargs) -> None:
     if not restrictions:
         # No restrictions no checks
         return None
 
-    expanded_command, parsed_command = _parse_command(command)
+    # venv is a copy to avoid modifying the original Popen kwargs or None to default to using os.environ when env is not set
+    venv = dict(**Popen_env) if (Popen_env := kwargs.get("env")) is not None else None
+
+    # Check if the executable is set by the Popen kwargs (either executable or shell)
+    # Executable takes precedence over shell. see subprocess.py line 1593
+    executable_path = _resolve_executable_path(kwargs.get("executable"), venv)
+    shell = executable_path.name in COMMON_SHELLS if executable_path else kwargs.get("shell")
+
+    expanded_command, parsed_command = _parse_command(command, venv, shell)
     if not parsed_command:
         # Empty commands are safe
         return None
 
-    executable = parsed_command[0]
-    executable_path = _resolve_executable_path(executable)
+    # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
+    if not executable_path:
+        executable_path = _resolve_executable_path(parsed_command[0], venv)
 
     abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(
-        parsed_command)
+        parsed_command, venv)
 
     if "PREVENT_COMMAND_CHAINING" in restrictions:
         check_multiple_commands(expanded_command, parsed_command)
@@ -574,7 +591,7 @@ def check_multiple_commands(expanded_command: str, parsed_command: List[str]) ->
             raise SecurityException(
                 f"Multiple commands not allowed. Process substitution operators found.")
 
-        if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES:
+        if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES | COMMON_SHELLS:
             raise SecurityException(
                 f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
 

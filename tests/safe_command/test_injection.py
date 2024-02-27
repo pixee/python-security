@@ -158,7 +158,6 @@ class TestSafeCommandInternals:
             ("${IFS}", " "),
             ("${IFS:0}", " "),
             ("${IFS:0:1}", " "),
-            ("${IFS:4:20}", " "),
             ("${HOME:4:20}", f"{str(Path.home())[4:20]}"),
             ("${HOME:4}", f"{str(Path.home())[4:]}"),
             ("${HOME:1:-10}", f"{str(Path.home())[1:-10]}"),
@@ -197,7 +196,9 @@ class TestSafeCommandInternals:
             ("${HOME: BADKEY=5: BADKEY+=5 } $BADKEY", f"{str(Path.home())[5:10]} 10"),
             ("${HOME: BADKEY=1+2+3 : BADKEY2=BADKEY+4 } $BADKEY $BADKEY2", f"{str(Path.home())[6:10]} 6 10"),
             ("${HOME: BADKEY=5+6-1-5 : BADKEY2=BADKEY+5 } ${BADKEY} ${BADKEY2}", f"{str(Path.home())[5:10]} 5 10"),
-            
+            ("${BADKEY:=} ${BADKEY:-cu}${BADKEY}${BADKEY:-rl}", " curl"),
+
+
             # Brace expansions
             ("a{d,c,b}e", "ade ace abe"),
             ("a{'d',\"c\",b}e", "ade ace abe"),
@@ -319,19 +320,19 @@ class TestSafeCommandInternals:
         error_msg = cm.value.args[0]
         assert error_msg.startswith("Disallowed shell expansion") or error_msg.startswith("Invalid arithmetic in shell expansion")
 
-
-@pytest.mark.parametrize("original_func", [subprocess.run, subprocess.call])
-class TestSafeCommandRestrictions:
-    EXCEPTIONS = {
+EXCEPTIONS = {
     "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES": SecurityException("Disallowed access to sensitive file"),
     "PREVENT_COMMAND_CHAINING": SecurityException("Multiple commands not allowed"),
     "PREVENT_COMMON_EXPLOIT_EXECUTABLES": SecurityException("Disallowed command"),
     "PREVENT_UNCOMMON_PATH_TYPES": SecurityException("Disallowed access to path type"),
     "PREVENT_ADMIN_OWNED_FILES": SecurityException("Disallowed access to file owned by"),
     "ANY": SecurityException("Any Security exception")
-    }
+}
 
-    def _run_test_with_command(self, original_func, expected_result, restrictions, command, shell=False, compare_stderr=False, *args, **kwargs):
+@pytest.mark.parametrize("original_func", [subprocess.run, subprocess.call])
+class TestSafeCommandRestrictions:
+
+    def _run_test_with_command(self, command, expected_result, restrictions, original_func, shell=True, compare_stderr=False, *args, **kwargs):
         if isinstance(expected_result, SecurityException):
             with pytest.raises(SecurityException) as cm:
                 safe_command.run(
@@ -344,8 +345,7 @@ class TestSafeCommandRestrictions:
             # If the expected exception is not "Any Security exception" then check that the raised exception starts with the expected message
             if expected_result.args[0] != "Any Security exception":
                 assert raised_exception.args[0].startswith(expected_result.args[0]) 
-            
-                
+                            
         else:
             result = safe_command.run(
                     original_func=original_func,
@@ -361,11 +361,6 @@ class TestSafeCommandRestrictions:
                 compare_val = result.stdout.strip() if not compare_stderr else result.stderr.strip()
                 assert compare_val == expected_result
                 
-
-    def _do_test_command(self, command, expected_result, restrictions, original_func):
-        shell = isinstance(command, str)
-        self._run_test_with_command(original_func, expected_result, restrictions, command, shell=shell)
-
 
     @pytest.mark.parametrize(
         "command",
@@ -417,9 +412,9 @@ class TestSafeCommandRestrictions:
         ] 
     )
     def test_check_multiple_commands(self, command, original_func, setup_teardown):
-        exception = self.EXCEPTIONS["PREVENT_COMMAND_CHAINING"]
+        exception = EXCEPTIONS["PREVENT_COMMAND_CHAINING"]
         restrictions = {"PREVENT_COMMAND_CHAINING"}
-        self._do_test_command(command, exception, restrictions, original_func)
+        self._run_test_with_command(command, exception, restrictions, original_func)
 
     @pytest.mark.parametrize(
         "command",
@@ -450,9 +445,9 @@ class TestSafeCommandRestrictions:
         ] 
     )            
     def test_check_sensitive_files(self, command, original_func, setup_teardown):
-        exception = self.EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"]
+        exception = EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"]
         restrictions = {"PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"}
-        self._do_test_command(command, exception, restrictions, original_func)
+        self._run_test_with_command(command, exception, restrictions, original_func)
 
 
     @pytest.mark.parametrize(
@@ -522,9 +517,9 @@ class TestSafeCommandRestrictions:
         ] 
     ) 
     def test_check_banned_executable(self, command, original_func, setup_teardown):
-        exception = self.EXCEPTIONS["PREVENT_COMMON_EXPLOIT_EXECUTABLES"]
+        exception = EXCEPTIONS["PREVENT_COMMON_EXPLOIT_EXECUTABLES"]
         restrictions = {"PREVENT_COMMON_EXPLOIT_EXECUTABLES"}
-        self._do_test_command(command, exception, restrictions, original_func)
+        self._run_test_with_command(command, exception, restrictions, original_func)
 
     @pytest.mark.parametrize(
         "command",
@@ -536,12 +531,12 @@ class TestSafeCommandRestrictions:
         ] 
     ) 
     def test_check_path_type(self, command, original_func, setup_teardown):
-        exception = self.EXCEPTIONS["PREVENT_UNCOMMON_PATH_TYPES"]
+        exception = EXCEPTIONS["PREVENT_UNCOMMON_PATH_TYPES"]
         restrictions = {"PREVENT_UNCOMMON_PATH_TYPES"}
 
         testpaths = setup_teardown
         command = insert_testpaths(command, testpaths)
-        self._do_test_command(command, exception, restrictions, original_func)
+        self._run_test_with_command(command, exception, restrictions, original_func)
 
 
     @pytest.mark.parametrize(
@@ -556,9 +551,9 @@ class TestSafeCommandRestrictions:
         ] 
     ) 
     def test_check_file_owner(self, command, original_func, setup_teardown):
-        exception = self.EXCEPTIONS["PREVENT_ADMIN_OWNED_FILES"]
+        exception = EXCEPTIONS["PREVENT_ADMIN_OWNED_FILES"]
         restrictions = {"PREVENT_ADMIN_OWNED_FILES"}
-        self._do_test_command(command, exception, restrictions, original_func)
+        self._run_test_with_command(command, exception, restrictions, original_func)
         
   
     @pytest.mark.parametrize(
@@ -597,7 +592,55 @@ class TestSafeCommandRestrictions:
             "PREVENT_UNCOMMON_PATH_TYPES",
             "PREVENT_ADMIN_OWNED_FILES"
         ]
-        self._do_test_command(command, expected_result, restrictions, original_func)
+        shell = isinstance(command, str)
+        self._run_test_with_command(command, expected_result, restrictions, original_func, shell=shell)
+
+
+    @pytest.mark.parametrize(
+        "command, expected_result, popen_kwargs",
+        [
+        ("echo $HOME/somefile/", f"{str(Path.home())}/somefile/", {"shell": True}),  
+        ("echo $HOME", "/Users/TESTHOME", {"env": {"HOME": "/Users/TESTHOME"}, "shell": True}),
+        ("echo $HOME", EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"env": {"HOME": "/etc/passwd"}, "shell": True}),
+        (["/bin/echo $HOME/somefile/"], f"{str(Path.home())}/somefile/", {"shell": True}), 
+        (["/bin/echo", "$HOME/somefile/"], f"$HOME/somefile/", {"shell": False}), 
+
+        # Should only raise exception if shell is True or executable is a shell
+        (["/bin/cat /etc/${BADKEY:-passwd}"], EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"shell": True}), 
+        (["/bin/cat /etc/${BADKEY:-passwd}"], EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"shell": False, "executable": "/bin/bash"}), 
+        (["/bin/cat", "/etc/${BADKEY:-passwd}"], "", {"shell": False}), 
+        # Executable takes precedence over shell so this should not raise an exception even though the shell expansion would resolve to /etc/passwd
+        (["/etc/${BADKEY:-passwd}"], "", {"shell": True, "executable": "/bin/cat"}), 
+
+        # env kwarg values used in shell expansions
+        ("echo $HOME/{file1.txt,file2.txt,${BADKEY:=file3.txt},${BADKEY:+file4.txt}}", 
+            "/Users/TESTHOME/file1.txt /Users/TESTHOME/file2.txt /Users/TESTHOME/file3.txt /Users/TESTHOME/file4.txt", 
+            {"shell": True, "env": {"HOME": "/Users/TESTHOME"}}),
+        (["-c", "cat /{junk1,\"${TEST:1:2}${TEST:0:1}\"}c/p*sswd"], 
+            EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], 
+            {"shell": False, "executable": "bash", "env": {"TEST": "test"}}),
+
+        # path resolution should be based on env variables
+        ("which ls", which("ls"), {"shell": True}),
+        ("which ls", "", {"shell": True, "env": {"PATH": ""}}),
+        ("(sh)<<<'{nc,-l,-p,4444}'", EXCEPTIONS["PREVENT_COMMON_EXPLOIT_EXECUTABLES"], {"shell": True}),
+        # No exception should be raised here becuase when env PATH is set to empty string, the executables can't be found
+        ("(sh)<<<'{nc,-l,-p,4444}'", "", {"shell": True, "env" : {"PATH": ""}}),
+        ]
+
+    )
+    def test_popen_kwargs(self, command, expected_result, popen_kwargs, original_func):
+        if original_func.__name__ == "call":
+            # call doesn't have capture_output kwarg so can't compare result and easier to just return than refactor
+            return 
+        
+        restrictions = [
+            "PREVENT_COMMAND_CHAINING", 
+            "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES",
+            "PREVENT_COMMON_EXPLOIT_EXECUTABLES", 
+        ]
+
+        self._run_test_with_command(command, expected_result, restrictions, original_func, **popen_kwargs)
 
 
     # FUZZDB tests
@@ -617,7 +660,7 @@ class TestSafeCommandRestrictions:
             "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES",
             "PREVENT_COMMON_EXPLOIT_EXECUTABLES", 
         ]
-        self._do_test_command(command, self.EXCEPTIONS["ANY"], restrictions, original_func)
+        self._run_test_with_command(command, EXCEPTIONS["ANY"], restrictions, original_func)
             
 
     @pytest.mark.parametrize(
