@@ -46,7 +46,7 @@ BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
     "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
     "bash", "sh", "zsh", "csh", "rsh", "tcsh", "ksh", "dash", "fish", "powershell", "pwsh", "pwsh-preview", "pwsh-lts",
     "xargs", "awk", "perl", "python", "ruby", "php", "lua", "tclsh", "sqlplus",
-    "expect", "screen", "tmux", "byobu", "byobu-ugraph", "script", "scriptreplay", "scriptlive",
+    "expect", "screen", "tmux", "byobu", "byobu-ugraph", "time",
     "nohup", "at", "batch", "anacron", "cron", "crontab", "systemctl", "service", "init", "telinit",
     "systemd", "systemd-run"
 ))

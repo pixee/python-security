@@ -2,16 +2,16 @@ import pytest
 import subprocess
 from pathlib import Path
 from os import mkfifo, symlink, remove, getenv
-from shutil import rmtree, which
+from shutil import which
 
 from security import safe_command
 from security.safe_command.api import _parse_command, _resolve_paths_in_parsed_command, _shell_expand
 from security.exceptions import SecurityException
 
 with (Path(__file__).parent / "fuzzdb" / "command-injection-template.txt").open() as f:
-    FUZZDB_OS_COMMAND_INJECTION_PAYLOADS = [line.replace('\\n','\n').replace("\\'", "'")[:-1] for line in f] # Remove newline
+    FUZZDB_OS_COMMAND_INJECTION_PAYLOADS = [line.replace('\\n','\n').replace("\\'", "'")[:-1] for line in f] # Remove newline from the end without modifying payloads and handle escapes
 with (Path(__file__).parent / "fuzzdb" / "traversals-8-deep-exotic-encoding.txt").open() as f:
-    FUZZDB_PATH_TRAVERSAL_PAYLOADS = [line.replace('\\n','\n').replace("\\'", "'")[:-1] for line in f] # Remove newline
+    FUZZDB_PATH_TRAVERSAL_PAYLOADS = [line.replace('\\n','\n').replace("\\'", "'")[:-1] for line in f]
 
 
 @pytest.fixture
@@ -64,10 +64,7 @@ def setup_teardown(tmpdir):
         "sh": sh
     }
     yield testpaths
-    
-    # Clean up the test files and directories
-    rmtree(tmpdir, ignore_errors=True)
-    remove(cwd_testfile)
+    remove(cwd_testfile) # Remove the current working directory test file since it is not in tmpdir
     
 
 def insert_testpaths(command, testpaths):
