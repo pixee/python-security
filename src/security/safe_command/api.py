@@ -2,7 +2,7 @@ import shlex
 from re import compile as re_compile
 from pathlib import Path
 from glob import iglob
-from os import getenv, get_exec_path, environ, access, X_OK
+from os import getenv, get_exec_path, access, X_OK
 from os.path import expanduser, expandvars
 from shutil import which
 from subprocess import CompletedProcess
