@@ -1,3 +1,4 @@
+These test vectors were taken from the fuzzdb project under the terms of the license in _copyright.txt
 {cmd}
 ;{cmd}
 ;{cmd};
