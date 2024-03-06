@@ -6,7 +6,7 @@ from os import getenv, get_exec_path, access, X_OK
 from os.path import expanduser, expandvars
 from shutil import which
 from subprocess import CompletedProcess
-from typing import Union, Optional, List, Tuple, Set, FrozenSet, Sequence, Callable, Iterator
+from typing import Union, Optional, List, FrozenSet, Sequence, Callable, Iterator
 from security.exceptions import SecurityException
 
 ValidRestrictions = Optional[Union[FrozenSet[str], Sequence[str]]]
@@ -37,8 +37,8 @@ BANNED_EXECUTABLES = frozenset(
     ("nc", "netcat", "ncat", "curl", "wget", "dpkg", "rpm"))
 BANNED_PATHTYPES = frozenset(
     ("mount", "symlink", "block_device", "char_device", "fifo", "socket"))
-BANNED_OWNERS = frozenset(("root", "admin", "wheel", "sudo"))
-BANNED_GROUPS = frozenset(("root", "admin", "wheel", "sudo"))
+BANNED_OWNERS = frozenset(("root", "admin", "wheel", "sudo", "Administrator", "SYSTEM"))
+BANNED_GROUPS = frozenset(("root", "admin", "wheel", "sudo", "Administrators", "SYSTEM"))
 BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n"))
 BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS = frozenset(
     ("$(", "`", "<(", ">("))
@@ -57,9 +57,15 @@ BANNED_SHELL_EXPANSION_OPERATORS = frozenset(
     ("!", "*", "@", "#", "%", "/", "^", ","))
 
 
-def run(original_func: Callable, command: ValidCommand, *args, restrictions: ValidRestrictions = DEFAULT_CHECKS, **kwargs) -> Union[CompletedProcess, None]:
+def run(original_func: Callable, 
+        command: ValidCommand, 
+        *args, 
+        restrictions: ValidRestrictions = DEFAULT_CHECKS, 
+        max_resolved_paths: int = 10000,
+        rglob_dirs: bool = True,
+        **kwargs) -> Union[CompletedProcess, None]:
     # If there is a command and it passes the checks pass it the original function call
-    check(command, restrictions, **kwargs)
+    check(command, restrictions, max_resolved_paths, rglob_dirs, **kwargs)
     return _call_original(original_func, command, *args, **kwargs)
 
 
@@ -431,10 +437,7 @@ def _recursive_shlex_split(command: str) -> Iterator[str]:
             yield from _recursive_shlex_split(cmd_part)
 
 
-def _parse_command(command: ValidCommand, venv: Optional[dict] = None, shell: Optional[bool] = True) -> Tuple[str, List[str]]:
-    """
-    Expands the shell exspansions in the command then parses the expanded command into a list of command parts.
-    """
+def _validate_and_expand_command(command: ValidCommand, venv: Optional[dict] = None, shell: Optional[bool] = True) -> str:
     if isinstance(command, str):
         command_str = command
     elif isinstance(command, list):
@@ -443,18 +446,16 @@ def _parse_command(command: ValidCommand, venv: Optional[dict] = None, shell: Op
         raise TypeError("Command must be a str or a list")
 
     if not command_str:
-        # No need to expand or parse an empty command
-        return ("", [])
-
+        # No need to expand an empty command
+        return command_str
+    
     spaced_command = _space_redirection_operators(command_str)
-    expanded_command = _shell_expand(
-        spaced_command, venv) if shell else spaced_command
-    parsed_command = list(_recursive_shlex_split(expanded_command))
-    return expanded_command, parsed_command
+    expanded_command = _shell_expand(spaced_command, venv) if shell else spaced_command
+    return expanded_command
 
 
 def _path_is_executable(path: Path) -> bool:
-    return access(path, X_OK)
+    return access(path, X_OK) and not path.is_dir()
 
 
 def _resolve_executable_path(executable: Optional[str], venv: Optional[dict] = None) -> Optional[Path]:
@@ -475,148 +476,140 @@ def _resolve_executable_path(executable: Optional[str], venv: Optional[dict] = N
     return None
 
 
-def _resolve_paths_in_parsed_command(parsed_command: List[str], venv: Optional[dict] = None) -> Tuple[Set[Path], Set[str]]:
+def _recursive_resolve_symlinks(path: Path, rglob_dirs: bool = True) -> Iterator[Path]:
     """
-    Create Path objects from the parsed commands and resolve symlinks then add to sets of unique Paths 
-    and absolute path strings for comparison with the sensitive files, common exploit executables and group/owner checks.
+    Recursively resolves symlinks in the path.
+    When the path is a symlink first the absolute path of the symlink is yielded
+    then _recursive_resolve_symlinks is called on the resolved path of its target
+    this is needed to handle nested symlinks and symlinks to directories which may contain symlinks
+    """
+    if path.is_symlink():
+        yield path.absolute()
+        yield from _recursive_resolve_symlinks(path.resolve(), rglob_dirs)
+    elif path.is_dir():
+        yield path.absolute()
+        if rglob_dirs:
+            for file in path.rglob("*"):
+                yield from _recursive_resolve_symlinks(file, rglob_dirs)
+    else:
+        # a final .resolve is needed to handle files like /private/etc/passwd on MacOS which behave like symlinks but are not according to Path.is_symlink
+        yield path.resolve()
+
+
+def _resolve_paths_in_command_part(cmd_part: str, venv: Optional[dict] = None, rglob_dirs: bool = True) -> Iterator[Path]:
+    """
+    Create Path objects handling tilde expansion, globbing and symlinks in the command part.
     """
 
-    abs_paths, abs_path_strings = set(), set()
+    if "~" in cmd_part:
+        # Expand ~ and ~user constructions in the cmd_part
+        cmd_part = expanduser(cmd_part)
 
-    for cmd_part in parsed_command:
+    # Check if the cmd_part is an executable and resolve the path
+    if executable_path := _resolve_executable_path(cmd_part, venv):
+        yield executable_path
+        return # Globbing is redundant when the cmd_part is an executable
 
-        if "~" in cmd_part:
-            # Expand ~ and ~user constructions in the cmd_part
-            cmd_part = expanduser(cmd_part)
-
-        # Check if the cmd_part is an executable and resolve the path
-        if executable_path := _resolve_executable_path(cmd_part, venv):
-            abs_paths.add(executable_path)
-            abs_path_strings.add(str(executable_path))
-
-        # Handle any globbing characters and repeating slashes from the command and resolve symlinks to get absolute path
-        for path in iglob(cmd_part, recursive=True):
-            path = Path(path)
-
-            # When its a symlink both the absolute path of the symlink
-            # and the resolved path of its target are added to the sets
-            if path.is_symlink():
-                path = path.absolute()
-                abs_paths.add(path)
-                abs_path_strings.add(str(path))
-
-            abs_path = Path(path).resolve()
-            abs_paths.add(abs_path)
-            abs_path_strings.add(str(abs_path))
-
-            # Check if globbing and/or resolving symlinks returned an executable and add to the sets
-            if executable_path := _resolve_executable_path(str(path), venv):
-                abs_paths.add(executable_path)
-                abs_path_strings.add(str(executable_path))
-
-            # Check if globbing and/or resolving symlinks returned a directory and add all files in the directory to the sets
-            if abs_path.is_dir():
-                for file in abs_path.rglob("*"):
-                    file = file.resolve()
-                    abs_paths.add(file)
-                    abs_path_strings.add(str(file))
-
-    return abs_paths, abs_path_strings
+    # Handle any globbing characters and repeating slashes from the command and resolve symlinks to get absolute paths
+    for path in map(Path, iglob(cmd_part, recursive=True)):
+        yield from _recursive_resolve_symlinks(path, rglob_dirs)
 
 
-def check(command: ValidCommand, restrictions: ValidRestrictions, **kwargs) -> None:
+def check(command: ValidCommand, 
+          restrictions: ValidRestrictions, 
+          max_resolved_paths: int = 10000,
+          rglob_dirs: bool = True,
+          **Popen_kwargs) -> None:
     if not restrictions:
         # No restrictions no checks
         return None
 
-    # venv is a copy to avoid modifying the original Popen kwargs or None to default to using os.environ when env is not set
-    venv = dict(**Popen_env) if (Popen_env := kwargs.get("env")) is not None else None
+    # venv is a copy to avoid modifying the original Popen_kwargs or None to default to using os.environ when env is not set
+    venv = dict(**Popen_env) if (Popen_env := Popen_kwargs.get("env")) is not None else None
 
-    # Check if the executable is set by the Popen kwargs (either executable or shell)
+    # Check if the executable is set by the Popen Popen_kwargs (either executable or shell)
     # Executable takes precedence over shell. see subprocess.py line 1593
-    executable_path = _resolve_executable_path(kwargs.get("executable"), venv)
-    shell = executable_path.name in COMMON_SHELLS if executable_path else kwargs.get("shell")
+    executable_path = _resolve_executable_path(Popen_kwargs.get("executable"), venv)
+    shell = executable_path.name in COMMON_SHELLS if executable_path else Popen_kwargs.get("shell")
 
-    expanded_command, parsed_command = _parse_command(command, venv, shell)
-    if not parsed_command:
+    if not (expanded_command := _validate_and_expand_command(command, venv, shell)):
         # Empty commands are safe
         return None
-
-    # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
-    if not executable_path:
-        executable_path = _resolve_executable_path(parsed_command[0], venv)
-
-    abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(
-        parsed_command, venv)
-
-    if "PREVENT_COMMAND_CHAINING" in restrictions:
-        check_multiple_commands(expanded_command, parsed_command)
-
-    if "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES" in restrictions:
-        check_sensitive_files(expanded_command, abs_path_strings)
-
-    if "PREVENT_COMMON_EXPLOIT_EXECUTABLES" in restrictions:
-        check_banned_executable(expanded_command, abs_path_strings)
-
+    
+    # First check the expanded command string for the restrictions
+    if prevent_command_chaining := "PREVENT_COMMAND_CHAINING" in restrictions:
+        check_newline_in_expanded_command(expanded_command)    
+    if prevent_sensitive_files := "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES" in restrictions:
+        check_sensitive_files_in_expanded_command(expanded_command)
+    if prevent_common_exploit_executables := "PREVENT_COMMON_EXPLOIT_EXECUTABLES" in restrictions:
+        check_banned_executable_in_expanded_command(expanded_command)
+    
+    # Create local bools for each restriction to avoid membership check each iteration
     prevent_uncommon_path_types = "PREVENT_UNCOMMON_PATH_TYPES" in restrictions
     prevent_admin_owned_files = "PREVENT_ADMIN_OWNED_FILES" in restrictions
 
-    for path in abs_paths:
-        # to avoid blocking the executable itself since most are symlinks to the actual executable
-        # and owned by root with group wheel or sudo
-        if path == executable_path:
-            continue
+    # Then check the parsed command parts for the restrictions if the expanded command passes
+    parsed_command = _recursive_shlex_split(expanded_command)
 
-        if prevent_uncommon_path_types:
-            check_path_type(path)
+    # Determine if path resolution is needed based on the restrictions
+    check_path_string = prevent_sensitive_files or prevent_common_exploit_executables
+    resolve_paths = check_path_string or prevent_uncommon_path_types or prevent_admin_owned_files
+        
+    num_resolved_paths = 0
+    for cmd_part in parsed_command:
+        if prevent_command_chaining:
+            check_multiple_commands(cmd_part)
 
-        if prevent_admin_owned_files:
-            check_file_owner(path)
-            check_file_group(path)
+        if not resolve_paths:
+           continue
 
+        for path in _resolve_paths_in_command_part(cmd_part, venv, rglob_dirs):
+            num_resolved_paths += 1
+            if max_resolved_paths >= 0 and num_resolved_paths > max_resolved_paths:
+                raise SecurityException(
+                    f"Exceeded maximum number of resolved paths: {max_resolved_paths}")
 
-def check_multiple_commands(expanded_command: str, parsed_command: List[str]) -> None:
+            if check_path_string:
+                path_string = str(path)
+                if prevent_sensitive_files:
+                    check_path_is_sensitive_file(path_string)
+                if prevent_common_exploit_executables:
+                    check_path_is_banned_executable(path_string)
+
+            if not executable_path and num_resolved_paths == 1:
+                # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
+                executable_path = path
+                # continue to avoid blocking the executable itself since most are symlinks to the actual executable and owned by root with group wheel or sudo
+                continue
+            if prevent_uncommon_path_types:
+                check_path_type(path)
+            if prevent_admin_owned_files:
+                check_path_owner(path)
+                check_path_group(path)
+    
+
+# Expanded Command checks
+def check_newline_in_expanded_command(expanded_command: str) -> None:
     # Since shlex.split removes newlines from the command, it would not be present in the parsed_command and
     # must be checked for in the expanded command string
     if '\n' in expanded_command:
         raise SecurityException(
             "Multiple commands not allowed. Newline found.")
+    
 
-    for cmd_part in parsed_command:
-        if any(seperator in cmd_part for seperator in BANNED_COMMAND_CHAINING_SEPARATORS):
-            raise SecurityException(
-                f"Multiple commands not allowed. Separators found.")
-
-        if any(substitution_op in cmd_part for substitution_op in BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS):
-            raise SecurityException(
-                f"Multiple commands not allowed. Process substitution operators found.")
-
-        if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES | COMMON_SHELLS:
-            raise SecurityException(
-                f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
-
-
-def check_sensitive_files(expanded_command: str, abs_path_strings: Set[str]) -> None:
+def check_sensitive_files_in_expanded_command(expanded_command: str) -> None:
     for sensitive_path in SENSITIVE_FILE_PATHS:
         # First check the absolute path strings for the sensitive files
         # Then handle edge cases when a sensitive file is part of a command but the path could not be resolved
-        if (
-            any(abs_path_string.endswith(sensitive_path)
-                for abs_path_string in abs_path_strings)
-            or sensitive_path in expanded_command
-        ):
+        if sensitive_path in expanded_command:
             raise SecurityException(
                 f"Disallowed access to sensitive file: {sensitive_path}")
+        
 
-
-def check_banned_executable(expanded_command: str, abs_path_strings: Set[str]) -> None:
+def check_banned_executable_in_expanded_command(expanded_command: str) -> None:
     for banned_executable in BANNED_EXECUTABLES:
-        # First check the absolute path strings for the banned executables
-        # Then handle edge cases when a banned executable is part of a command but the path could not be resolved
-        if (
-            any((abs_path_string.endswith(
-                f"/{banned_executable}") for abs_path_string in abs_path_strings))
-            or expanded_command.startswith(f"{banned_executable} ")
+        # Handles edge cases when a banned executable is part of a command but the path could not be resolved
+        if (expanded_command.startswith(f"{banned_executable} ")
             or f"bin/{banned_executable}" in expanded_command
             or f" {banned_executable} " in expanded_command
         ):
@@ -624,6 +617,39 @@ def check_banned_executable(expanded_command: str, abs_path_strings: Set[str]) -
                 f"Disallowed command: {banned_executable}")
 
 
+# Parsed Command (cmd_part) checks
+def check_multiple_commands(cmd_part: str) -> None:
+    if any(seperator in cmd_part for seperator in BANNED_COMMAND_CHAINING_SEPARATORS):
+        raise SecurityException(
+            f"Multiple commands not allowed. Separators found.")
+
+    if any(substitution_op in cmd_part for substitution_op in BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS):
+        raise SecurityException(
+            f"Multiple commands not allowed. Process substitution operators found.")
+
+    if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES | COMMON_SHELLS:
+        raise SecurityException(
+            f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
+
+
+# Path string checks
+def check_path_is_sensitive_file(path_string: str) -> None:
+    for sensitive_path in SENSITIVE_FILE_PATHS:
+        # Check if the absolute path is a sensitive file
+        if path_string.endswith(sensitive_path):
+            raise SecurityException(
+                f"Disallowed access to sensitive file: {sensitive_path}")
+
+
+def check_path_is_banned_executable(path_string: str) -> None:
+    for banned_executable in BANNED_EXECUTABLES:
+        # Check if the absolute path string is a banned executable
+        if path_string.endswith(f"/{banned_executable}"):
+            raise SecurityException(
+                f"Disallowed command: {banned_executable}")
+
+
+# Path checks
 def check_path_type(path: Path) -> None:
     for pathtype in BANNED_PATHTYPES:
         if getattr(path, f"is_{pathtype}")():
@@ -631,14 +657,14 @@ def check_path_type(path: Path) -> None:
                 f"Disallowed access to path type {pathtype}: {path}")
 
 
-def check_file_owner(path: Path) -> None:
+def check_path_owner(path: Path) -> None:
     owner = path.owner()
     if owner in BANNED_OWNERS:
         raise SecurityException(
             f"Disallowed access to file owned by {owner}: {path}")
 
 
-def check_file_group(path: Path) -> None:
+def check_path_group(path: Path) -> None:
     group = path.group()
     if group in BANNED_GROUPS:
         raise SecurityException(
