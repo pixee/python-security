@@ -551,8 +551,10 @@ def check(command: ValidCommand,
     prevent_admin_owned_files = "PREVENT_ADMIN_OWNED_FILES" in restrictions
     
     # Determine if path resolution is needed based on the restrictions
-    check_path_string = prevent_sensitive_files or prevent_common_exploit_executables
-    resolve_paths = check_path_string or prevent_uncommon_path_types or prevent_admin_owned_files
+    resolve_paths = (prevent_sensitive_files 
+                     or prevent_common_exploit_executables 
+                     or prevent_uncommon_path_types 
+                     or prevent_admin_owned_files)
     
     # Then check the parsed command cmd_parts for the restrictions if the expanded command passes checks   
     num_resolved_paths = 0
@@ -569,18 +571,17 @@ def check(command: ValidCommand,
                 raise SecurityException(
                     f"Exceeded maximum number of resolved paths: {max_resolved_paths}")
 
-            if check_path_string:
-                path_string = str(path)
-                if prevent_sensitive_files:
-                    check_path_is_sensitive_file(path_string)
-                if prevent_common_exploit_executables:
-                    check_path_is_banned_executable(path_string)
+            if prevent_sensitive_files:
+                check_path_is_sensitive_file(path)
+            if prevent_common_exploit_executables:
+                check_path_is_banned_executable(path)
 
             if not executable_path:
                 # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
                 executable_path = path
                 # continue to avoid blocking the executable itself since most are symlinks to the actual executable and owned by root with group wheel or sudo
                 continue
+
             if prevent_uncommon_path_types:
                 check_path_type(path)
             if prevent_admin_owned_files:
@@ -631,8 +632,10 @@ def check_multiple_commands(cmd_part: str) -> None:
             f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
 
 
-# Path string checks
-def check_path_is_sensitive_file(path_string: str) -> None:
+# Path checks
+def check_path_is_sensitive_file(path: Path) -> None:
+    # Convert to string and check endswith so /private/etc/passwd on mac and /etc/passwd on linux are handled the same
+    path_string = str(path)
     for sensitive_path in SENSITIVE_FILE_PATHS:
         # Check if the absolute path is a sensitive file
         if path_string.endswith(sensitive_path):
@@ -640,15 +643,12 @@ def check_path_is_sensitive_file(path_string: str) -> None:
                 f"Disallowed access to sensitive file: {sensitive_path}")
 
 
-def check_path_is_banned_executable(path_string: str) -> None:
-    for banned_executable in BANNED_EXECUTABLES:
-        # Check if the absolute path string is a banned executable
-        if path_string.endswith(f"/{banned_executable}"):
-            raise SecurityException(
-                f"Disallowed command: {banned_executable}")
+def check_path_is_banned_executable(path: Path) -> None:
+    if (banned_executable := path.name) in BANNED_EXECUTABLES:
+        raise SecurityException(
+            f"Disallowed command: {banned_executable}")
 
 
-# Path checks
 def check_path_type(path: Path) -> None:
     for pathtype in BANNED_PATHTYPES:
         if getattr(path, f"is_{pathtype}")():
@@ -657,14 +657,12 @@ def check_path_type(path: Path) -> None:
 
 
 def check_path_owner(path: Path) -> None:
-    owner = path.owner()
-    if owner in BANNED_OWNERS:
+    if (owner := path.owner()) in BANNED_OWNERS:
         raise SecurityException(
             f"Disallowed access to file owned by {owner}: {path}")
 
 
 def check_path_group(path: Path) -> None:
-    group = path.group()
-    if group in BANNED_GROUPS:
+    if (group := path.group()) in BANNED_GROUPS:
         raise SecurityException(
             f"Disallowed access to file owned by {group}: {path}")
