@@ -492,7 +492,8 @@ def _recursive_resolve_symlinks(path: Path, rglob_dirs: bool = True) -> Iterator
             for file in path.rglob("*"):
                 yield from _recursive_resolve_symlinks(file, rglob_dirs)
     else:
-        # a final .resolve is needed to handle files like /private/etc/passwd on MacOS which behave like symlinks but are not according to Path.is_symlink
+        # a final .resolve is needed to handle files like /etc/passwd on MacOS which behaves 
+        # like a symlink to /private/etc/passwd but is not a symlink according to Path.is_symlink
         yield path.resolve()
 
 
@@ -520,6 +521,7 @@ def check(command: ValidCommand,
           max_resolved_paths: int = 10000,
           rglob_dirs: bool = True,
           **Popen_kwargs) -> None:
+    
     if not restrictions:
         # No restrictions no checks
         return None
@@ -547,16 +549,14 @@ def check(command: ValidCommand,
     # Create local bools for each restriction to avoid membership check each iteration
     prevent_uncommon_path_types = "PREVENT_UNCOMMON_PATH_TYPES" in restrictions
     prevent_admin_owned_files = "PREVENT_ADMIN_OWNED_FILES" in restrictions
-
-    # Then check the parsed command parts for the restrictions if the expanded command passes
-    parsed_command = _recursive_shlex_split(expanded_command)
-
+    
     # Determine if path resolution is needed based on the restrictions
     check_path_string = prevent_sensitive_files or prevent_common_exploit_executables
     resolve_paths = check_path_string or prevent_uncommon_path_types or prevent_admin_owned_files
-        
+    
+    # Then check the parsed command cmd_parts for the restrictions if the expanded command passes checks   
     num_resolved_paths = 0
-    for cmd_part in parsed_command:
+    for cmd_part in _recursive_shlex_split(expanded_command):
         if prevent_command_chaining:
             check_multiple_commands(cmd_part)
 
@@ -576,7 +576,7 @@ def check(command: ValidCommand,
                 if prevent_common_exploit_executables:
                     check_path_is_banned_executable(path_string)
 
-            if not executable_path and num_resolved_paths == 1:
+            if not executable_path:
                 # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
                 executable_path = path
                 # continue to avoid blocking the executable itself since most are symlinks to the actual executable and owned by root with group wheel or sudo
@@ -599,8 +599,7 @@ def check_newline_in_expanded_command(expanded_command: str) -> None:
 
 def check_sensitive_files_in_expanded_command(expanded_command: str) -> None:
     for sensitive_path in SENSITIVE_FILE_PATHS:
-        # First check the absolute path strings for the sensitive files
-        # Then handle edge cases when a sensitive file is part of a command but the path could not be resolved
+        # Handles edge cases when a sensitive file is part of a command but the path could not be resolved
         if sensitive_path in expanded_command:
             raise SecurityException(
                 f"Disallowed access to sensitive file: {sensitive_path}")
