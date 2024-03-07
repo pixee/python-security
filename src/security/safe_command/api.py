@@ -43,12 +43,13 @@ BANNED_COMMAND_CHAINING_SEPARATORS = frozenset(("&", ";", "|", "\n"))
 BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS = frozenset(
     ("$(", "`", "<(", ">("))
 BANNED_COMMAND_CHAINING_EXECUTABLES = frozenset((
-    "eval", "exec", "-exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
+    "eval", "exec", "env", "source", "sudo", "su", "gosu", "sudoedit",
     "xargs", "awk", "perl", "python", "ruby", "php", "lua", "sqlplus",
     "expect", "screen", "tmux", "byobu", "byobu-ugraph", "time",
     "nohup", "at", "batch", "anacron", "cron", "crontab", "systemctl", "service", "init", "telinit",
     "systemd", "systemd-run"
 ))
+BANNED_COMMAND_CHAINING_ARGUMENTS = frozenset(("-exec", "-execdir", "-ok", "-okdir", "system("))
 COMMON_SHELLS = frozenset(("sh", "bash", "zsh", "csh", "rsh", "tcsh", "tclsh", "ksh", "dash", "ash",
                           "jsh", "jcsh", "mksh", "wsh", "fish", "busybox", "powershell", "pwsh", "pwsh-preview", "pwsh-lts"))
 
@@ -528,7 +529,7 @@ def check(command: ValidCommand,
 
     # venv is a copy to avoid modifying the original Popen_kwargs or None to default to using os.environ when env is not set
     venv = dict(**Popen_env) if (Popen_env := Popen_kwargs.get("env")) is not None else None
-
+    
     # Check if the executable is set by the Popen Popen_kwargs (either executable or shell)
     # Executable takes precedence over shell. see subprocess.py line 1593
     executable_path = _resolve_executable_path(Popen_kwargs.get("executable"), venv)
@@ -549,28 +550,23 @@ def check(command: ValidCommand,
     # Create local bools for each restriction to avoid membership check each iteration
     prevent_uncommon_path_types = "PREVENT_UNCOMMON_PATH_TYPES" in restrictions
     prevent_admin_owned_files = "PREVENT_ADMIN_OWNED_FILES" in restrictions
-    
-    # Determine if path resolution is needed based on the restrictions
-    resolve_paths = (prevent_sensitive_files 
-                     or prevent_common_exploit_executables 
-                     or prevent_uncommon_path_types 
-                     or prevent_admin_owned_files)
-    
+        
     # Then check the parsed command cmd_parts for the restrictions if the expanded command passes checks   
     num_resolved_paths = 0
     for cmd_part in _recursive_shlex_split(expanded_command):
+        
         if prevent_command_chaining:
             check_multiple_commands(cmd_part)
-
-        if not resolve_paths:
-           continue
 
         for path in _resolve_paths_in_command_part(cmd_part, venv, rglob_dirs):
             num_resolved_paths += 1
             if max_resolved_paths >= 0 and num_resolved_paths > max_resolved_paths:
                 raise SecurityException(
                     f"Exceeded maximum number of resolved paths: {max_resolved_paths}")
-
+            
+            if prevent_command_chaining:
+                check_path_is_chaining_executable(path)
+                check_path_is_shell(path)
             if prevent_sensitive_files:
                 check_path_is_sensitive_file(path)
             if prevent_common_exploit_executables:
@@ -627,12 +623,24 @@ def check_multiple_commands(cmd_part: str) -> None:
         raise SecurityException(
             f"Multiple commands not allowed. Process substitution operators found.")
 
-    if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES | COMMON_SHELLS:
+    if cmd_part.strip() in BANNED_COMMAND_CHAINING_ARGUMENTS:
         raise SecurityException(
-            f"Multiple commands not allowed. Executable {cmd_part} allows command chaining.")
+            f"Multiple commands not allowed. Argument {cmd_part} allows command chaining.")
 
 
 # Path checks
+def check_path_is_chaining_executable(path: Path) -> None:
+    if (banned_chaining_executable := path.name) in BANNED_COMMAND_CHAINING_EXECUTABLES:
+        raise SecurityException(
+            f"Multiple commands not allowed. Executable {banned_chaining_executable} allows command chaining.")
+    
+
+def check_path_is_shell(path: Path) -> None:
+    if (shell := path.name) in COMMON_SHELLS:
+        raise SecurityException(
+            f"Multiple commands not allowed. Shell {shell} allows command chaining.")
+
+
 def check_path_is_sensitive_file(path: Path) -> None:
     # Convert to string and check endswith so /private/etc/passwd on mac and /etc/passwd on linux are handled the same
     path_string = str(path)
