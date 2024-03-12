@@ -585,11 +585,11 @@ def check_multiple_commands(expanded_command: str, parsed_command: List[str]) ->
     for cmd_part in parsed_command:
         if any(seperator in cmd_part for seperator in BANNED_COMMAND_CHAINING_SEPARATORS):
             raise SecurityException(
-                f"Multiple commands not allowed. Separators found.")
+                "Multiple commands not allowed. Separators found.")
 
         if any(substitution_op in cmd_part for substitution_op in BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS):
             raise SecurityException(
-                f"Multiple commands not allowed. Process substitution operators found.")
+                "Multiple commands not allowed. Process substitution operators found.")
 
         if cmd_part.strip() in BANNED_COMMAND_CHAINING_EXECUTABLES | COMMON_SHELLS:
             raise SecurityException(
