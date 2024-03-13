@@ -268,7 +268,7 @@ def _shell_expand(command: str, venv: Optional[dict] = None) -> str:
     """
 
     PARAM_EXPANSION_REGEX = re_compile(
-        r'(?P<fullexp>\$(?P<content>[a-zA-Z_][a-zA-Z0-9_]*|\{[^{}\$]+?\}))')
+        r'(?P<fullexp>\$(?P<content>[a-zA-Z_]\w*|\{[^{}\$]+?\}))')
     BRACE_EXPANSION_REGEX = re_compile(
         r'(?P<fullexp>\S*(?P<content>\{[^{}\$]+?\})\S*)')
 
@@ -326,8 +326,6 @@ def _shell_expand(command: str, venv: Optional[dict] = None) -> str:
             value = _get_env_var_value(var, venv, default="")
             if start_slice is not None:
                 value = value[start_slice:end_slice]
-            elif not operator or operator == "?":
-                value = value
             elif operator in "-=":
                 value = value or default
                 if operator == "=":
@@ -335,6 +333,7 @@ def _shell_expand(command: str, venv: Optional[dict] = None) -> str:
                     venv[var] = value
             elif operator == "+":
                 value = default if value else ""
+            # value = value when operator is ? or there is no operator
 
             command = command.replace(full_expansion, value, 1)
 
@@ -521,19 +520,19 @@ def check(command: ValidCommand,
           restrictions: ValidRestrictions, 
           max_resolved_paths: int = 10000,
           rglob_dirs: bool = True,
-          **Popen_kwargs) -> None:
+          **popen_kwargs) -> None:
     
     if not restrictions:
         # No restrictions no checks
         return None
 
-    # venv is a copy to avoid modifying the original Popen_kwargs or None to default to using os.environ when env is not set
-    venv = dict(**Popen_env) if (Popen_env := Popen_kwargs.get("env")) is not None else None
+    # venv is a copy to avoid modifying the original popen_kwargs or None to default to using os.environ when env is not set
+    venv = dict(**popen_env) if (popen_env := popen_kwargs.get("env")) is not None else None
     
-    # Check if the executable is set by the Popen Popen_kwargs (either executable or shell)
+    # Check if the executable is set by the popen popen_kwargs (either executable or shell)
     # Executable takes precedence over shell. see subprocess.py line 1593
-    executable_path = _resolve_executable_path(Popen_kwargs.get("executable"), venv)
-    shell = executable_path.name in COMMON_SHELLS if executable_path else Popen_kwargs.get("shell")
+    executable_path = _resolve_executable_path(popen_kwargs.get("executable"), venv)
+    shell = executable_path.name in COMMON_SHELLS if executable_path else popen_kwargs.get("shell")
 
     if not (expanded_command := _validate_and_expand_command(command, venv, shell)):
         # Empty commands are safe
@@ -573,7 +572,7 @@ def check(command: ValidCommand,
                 check_path_is_banned_executable(path)
 
             if not executable_path:
-                # If the executable is not set by the Popen kwargs it is the first command part (args). see subprocess.py line 1596
+                # If the executable is not set by the popen kwargs it is the first command part (args). see subprocess.py line 1596
                 executable_path = path
                 # continue to avoid blocking the executable itself since most are symlinks to the actual executable and owned by root with group wheel or sudo
                 continue
@@ -617,11 +616,11 @@ def check_banned_executable_in_expanded_command(expanded_command: str) -> None:
 def check_multiple_commands(cmd_part: str) -> None:
     if any(seperator in cmd_part for seperator in BANNED_COMMAND_CHAINING_SEPARATORS):
         raise SecurityException(
-            f"Multiple commands not allowed. Separators found.")
+            "Multiple commands not allowed. Separators found.")
 
     if any(substitution_op in cmd_part for substitution_op in BANNED_COMMAND_AND_PROCESS_SUBSTITUTION_OPERATORS):
         raise SecurityException(
-            f"Multiple commands not allowed. Process substitution operators found.")
+            "Multiple commands not allowed. Process substitution operators found.")
 
     if cmd_part.strip() in BANNED_COMMAND_CHAINING_ARGUMENTS:
         raise SecurityException(

@@ -645,7 +645,7 @@ class TestSafeCommandRestrictions:
         ("echo $HOME", "/Users/TESTHOME", {"env": {"HOME": "/Users/TESTHOME"}, "shell": True}),
         ("echo $HOME", EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"env": {"HOME": "/etc/passwd"}, "shell": True}),
         (["/bin/echo $HOME/somefile/"], f"{str(Path.home())}/somefile/", {"shell": True}), 
-        (["/bin/echo", "$HOME/somefile/"], f"$HOME/somefile/", {"shell": False}), 
+        (["/bin/echo", "$HOME/somefile/"], "$HOME/somefile/", {"shell": False}), 
 
         # Should only raise exception if shell is True or executable is a shell
         (["/bin/cat /etc/${BADKEY:-passwd}"], EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"shell": True}), 
