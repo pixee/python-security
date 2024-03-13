@@ -1,11 +1,11 @@
 import pytest
 import subprocess
 from pathlib import Path
-from os import mkfifo, symlink, remove, getenv
+from os import mkfifo, symlink, remove, getenv, listdir
 from shutil import which
 
 from security import safe_command
-from security.safe_command.api import _parse_command, _resolve_paths_in_parsed_command, _shell_expand
+from security.safe_command.api import _validate_and_expand_command, _recursive_shlex_split, _resolve_paths_in_command_part, _shell_expand
 from security.exceptions import SecurityException
 
 with (Path(__file__).parent / "fuzzdb" / "command-injection-template.txt").open() as f:
@@ -38,10 +38,29 @@ def setup_teardown(tmpdir):
     cwd_testfile.touch()
     fifo_testfile = (wd / "fifo_testfile").resolve()
     mkfifo(fifo_testfile)
-    symlink_testfile = (wd / "symlink_testfile").resolve()
-    symlink(cwd_testfile, symlink_testfile) # Target of symlink_testfile is cwd_testfile.txt
+    
     passwd = Path("/etc/passwd").resolve()
     sudoers = Path("/etc/sudoers").resolve()
+
+    symlink_to_cwd_testfile = (wd / "symlink_to_cwd_testfile").resolve()
+    symlink(cwd_testfile, symlink_to_cwd_testfile) # Target of symlink_to_cwd_testfile is cwd_testfile.txt
+
+    # Directory with a symlink to passwd
+    symlink_testdir = wd / "symlink_testdir"
+    symlink_testdir.mkdir()
+    symlink_to_passwd = symlink_testdir / "symlink_to_passwd"
+    symlink(passwd, symlink_to_passwd)
+
+    # Symlink to a directory with a symlink
+    symlink_to_symlink_testdir = wd / "symlink_to_symlink_testdir"
+    symlink(symlink_testdir, symlink_to_symlink_testdir)
+
+    # Directory with a symlink to a symlink to symlink passwd
+    nested_symlink_testdir = wd / "nested_symlink_testdir"
+    nested_symlink_testdir.mkdir()
+    symlink_to_symlink_to_passwd = nested_symlink_testdir / "symlink_to_symlink_to_passwd"
+    symlink(symlink_to_passwd, symlink_to_symlink_to_passwd)
+
     # Get Path objects for the test commands
     cat, echo, grep, nc, curl, sh = map(lambda cmd: Path(which(cmd) or f"/usr/bin/{cmd}" ), ["cat", "echo", "grep", "nc", "curl", "sh"]) 
     testpaths = {
@@ -53,9 +72,14 @@ def setup_teardown(tmpdir):
         "space_in_name": space_in_name,
         "cwd_testfile": cwd_testfile,
         "fifo_testfile": fifo_testfile,
-        "symlink_testfile": symlink_testfile,
+        "symlink_to_cwd_testfile": symlink_to_cwd_testfile,
         "passwd": passwd,
         "sudoers": sudoers,
+        "symlink_testdir": symlink_testdir,
+        "nested_symlink_testdir": nested_symlink_testdir,
+        "symlink_to_passwd": symlink_to_passwd,
+        "symlink_to_symlink_to_passwd": symlink_to_symlink_to_passwd,
+        "symlink_to_symlink_testdir": symlink_to_symlink_testdir,
         "cat": cat,
         "echo": echo,
         "grep": grep,
@@ -93,9 +117,12 @@ class TestSafeCommandInternals:
             ("echo test1 test2 test3 > test.txt", ["echo", "test1", "test2", "test3", ">", "test.txt"], ["echo", "test1", "test2", "test3", ">", "test.txt"]),
         ]
     )
-    def test_parse_command(self, str_cmd, list_cmd, expected_parsed_command, setup_teardown):
-        expanded_str_cmd, parsed_str_cmd = _parse_command(str_cmd)
-        expanded_list_cmd, parsed_list_cmd = _parse_command(list_cmd)
+    def test_parse_command(self, str_cmd, list_cmd, expected_parsed_command):
+        expanded_str_cmd = _validate_and_expand_command(str_cmd)
+        expanded_list_cmd = _validate_and_expand_command(list_cmd)
+        parsed_str_cmd = list(_recursive_shlex_split(expanded_str_cmd))
+        parsed_list_cmd = list(_recursive_shlex_split(expanded_list_cmd))
+
         assert expanded_str_cmd == expanded_list_cmd
         assert parsed_str_cmd == parsed_list_cmd == expected_parsed_command
 
@@ -122,7 +149,18 @@ class TestSafeCommandInternals:
             # Check fifo and symlink
             ("cat {fifo_testfile}", {"cat", "fifo_testfile"}),
             # Symlink should resolve to cwdtest.txt so should get the symlink and the target
-            ("cat {symlink_testfile}", {"cat", "symlink_testfile", "cwd_testfile"},), 
+            ("cat {symlink_to_cwd_testfile}", {"cat", "symlink_to_cwd_testfile", "cwd_testfile"},), 
+            # symlink_to_passwd should resolve to passwd so should get the symlink and the target
+            ("cat {symlink_to_passwd}", {"cat", "symlink_to_passwd", "passwd"}),
+            # Returns the original symlink and the target but NOT the intermediate symlink
+            ("cat {symlink_to_symlink_to_passwd}", {"cat", "symlink_to_symlink_to_passwd", "passwd"}),
+            # Returns the dir, the symlink in the dir, and the target
+            ("grep '.+' -r {symlink_testdir}", {"grep", "symlink_testdir", "symlink_to_passwd", "passwd"}),
+            # Returns the symlink to the dir, the dir, the symlink in the dir and the target
+            ("grep '.+' -r {symlink_to_symlink_testdir}", {"grep", "symlink_to_symlink_testdir", "symlink_testdir", "symlink_to_passwd", "passwd"}),
+            # Returns the dir, the symlink in the dir, and the target but NOT the intermediate symlink
+            ("grep '.+' -r {nested_symlink_testdir}", {"grep", "nested_symlink_testdir", "symlink_to_symlink_to_passwd", "passwd"}),
+
             # Check a command with binary name as an argument
             ("echo 'cat' {test.txt}", {"echo", "cat", "test.txt"}),
             # Command has a directory so should get the dir and all the subfiles and resolved symlink to cwdtest.txt
@@ -138,11 +176,14 @@ class TestSafeCommandInternals:
         command = insert_testpaths(command, testpaths)
         expected_paths = {testpaths[p] for p in expected_paths}
 
-        expanded_command, parsed_command = _parse_command(command)
-        abs_paths, abs_path_strings = _resolve_paths_in_parsed_command(parsed_command)
+        expanded_command = _validate_and_expand_command(command)
+        abs_paths = set()
+        for cmd_part in _recursive_shlex_split(expanded_command):
+            for path in _resolve_paths_in_command_part(cmd_part):
+                abs_paths.add(path)
+                
         assert abs_paths == expected_paths
-        assert abs_path_strings == {str(p) for p in expected_paths}
-
+        
 
     @pytest.mark.parametrize(
         "string, expanded_str",
@@ -326,6 +367,7 @@ EXCEPTIONS = {
     "PREVENT_COMMON_EXPLOIT_EXECUTABLES": SecurityException("Disallowed command"),
     "PREVENT_UNCOMMON_PATH_TYPES": SecurityException("Disallowed access to path type"),
     "PREVENT_ADMIN_OWNED_FILES": SecurityException("Disallowed access to file owned by"),
+    "MAX_RESOLVED_PATHS": SecurityException("Exceeded maximum number of resolved paths"),
     "ANY": SecurityException("Any Security exception")
 }
 
@@ -525,9 +567,9 @@ class TestSafeCommandRestrictions:
         "command",
         [
             "cat {fifo_testfile}",
-            "cat {symlink_testfile}",
+            "cat {symlink_to_cwd_testfile}",
             ["cat", "{fifo_testfile}"],
-            ["cat", "{symlink_testfile}"], 
+            ["cat", "{symlink_to_cwd_testfile}"], 
         ] 
     ) 
     def test_check_path_type(self, command, original_func, setup_teardown):
@@ -603,7 +645,7 @@ class TestSafeCommandRestrictions:
         ("echo $HOME", "/Users/TESTHOME", {"env": {"HOME": "/Users/TESTHOME"}, "shell": True}),
         ("echo $HOME", EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"env": {"HOME": "/etc/passwd"}, "shell": True}),
         (["/bin/echo $HOME/somefile/"], f"{str(Path.home())}/somefile/", {"shell": True}), 
-        (["/bin/echo", "$HOME/somefile/"], f"$HOME/somefile/", {"shell": False}), 
+        (["/bin/echo", "$HOME/somefile/"], "$HOME/somefile/", {"shell": False}), 
 
         # Should only raise exception if shell is True or executable is a shell
         (["/bin/cat /etc/${BADKEY:-passwd}"], EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"], {"shell": True}), 
@@ -641,6 +683,66 @@ class TestSafeCommandRestrictions:
         ]
 
         self._run_test_with_command(command, expected_result, restrictions, original_func, **popen_kwargs)
+
+
+    @pytest.mark.parametrize(
+        "command, max_resolved_paths, rglob_dirs, expected_result",
+        [
+            ("ls -a / ", 1000, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            # Should not raise a MAX_RESOLVED_PATHS exception because the rglob_dirs kwarg is set to False
+            ("ls -a / ", 1000, False, '\n'.join(sorted([".", ".."] + listdir("/")))),
+            
+            # Should raise a MAX_RESOLVED_PATHS max_resolved_paths is 1 which is less than the number of files in /etc regardless of whether rglob_dirs is True or False
+            ("ls -a /etc ", 1, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a /etc ", 1, False, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+
+            # Should raise a MAX_RESOLVED_PATHS exception since max_resolved_paths is 0 and the command has 1 resolved path even when rglob_dirs is False
+            ("ls -a /etc/ ", 0, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a /etc/ ", 0, False, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+
+            # Should not raise a MAX_RESOLVED_PATHS exception since there is no max_resolved_paths  
+            # but should raise a PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES exception since /etc/ contains sensitive files
+            ("ls -a /etc ", -1, True, EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"]),
+            # Should not raise either exception since there is no max_resolved_paths and etc/passwd is not resolved since rglob_dirs is False
+            ("ls -a /etc ", -1, False, '\n'.join(sorted([".", ".."] + listdir("/etc")))),
+            ("ls -a /etc/ ", -1, False, '\n'.join(sorted([".", ".."] + listdir("/etc/")))),
+
+            #Same as above but with globbing
+            ("ls -a ////e*c ", 1, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a ////e*c ", 1, False, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a ////e*c// ", 0, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a ////e*c// ", 0, False, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            ("ls -a ////e*c ", -1, True, EXCEPTIONS["PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES"]),
+            ("ls -a ////e*c ", -1, False, '\n'.join(sorted([".", ".."] + listdir("/etc")))),
+            ("ls -a ////e*c/// ", -1, False, '\n'.join(sorted([".", ".."] + listdir("/etc/")))),
+
+            # Each of these should raise a MAX_RESOLVED_PATHS exception since max_resolved_paths is 1 less than the number of resolved paths
+            ("cat {symlink_to_cwd_testfile}", 2, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]), 
+            # symlink_to_passwd should resolve to passwd so should get the symlink and the target (3 resolved paths)
+            ("cat {symlink_to_passwd}", 2, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]), 
+            # Resolves the executable, the original symlink and the target but NOT the intermediate symlink (3 resolved paths)
+            ("cat {symlink_to_symlink_to_passwd}", 2, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            # Resolves the executable, the dir, the symlink in the dir, and the target (4 resolved paths)
+            ("grep '.+' -r {symlink_testdir}", 3, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            # Resolves the executable, the symlink to the dir, the dir, the symlink in the dir and the target (5 resolved paths)
+            ("grep '.+' -r {symlink_to_symlink_testdir}", 4, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+            # Resolves the executable, the dir, the symlink in the dir, and the target but NOT the intermediate symlink (4 resolved paths)
+            ("grep '.+' -r {nested_symlink_testdir}", 3, True, EXCEPTIONS["MAX_RESOLVED_PATHS"]),
+        ]
+    )
+    def test_max_resolved_paths(self, command, max_resolved_paths, rglob_dirs, expected_result, original_func, setup_teardown):
+        if original_func.__name__ == "call":
+            # call doesn't have capture_output kwarg so can't compare result and easier to just return than refactor
+            return 
+
+        testpaths = setup_teardown
+        command = insert_testpaths(command, testpaths)
+        expected_result = insert_testpaths(expected_result, testpaths)
+        
+        restrictions = [
+            "PREVENT_ARGUMENTS_TARGETING_SENSITIVE_FILES",
+        ]
+        self._run_test_with_command(command, expected_result, restrictions, original_func, rglob_dirs=rglob_dirs, max_resolved_paths=max_resolved_paths)
 
 
     # FUZZDB tests
