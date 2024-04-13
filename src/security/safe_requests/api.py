@@ -40,7 +40,7 @@ def get(
     **kwargs,
 ):
     UrlParser(url).check(allowed_protocols, host_validator)
-    return unsafe_get(url, params=params, **kwargs)
+    return unsafe_get(url, params=params, **kwargs, timeout=60)
 
 
 def post(
@@ -52,4 +52,4 @@ def post(
     **kwargs,
 ):
     UrlParser(url).check(allowed_protocols, host_validator)
-    return unsafe_post(url, data=data, json=json, **kwargs)
+    return unsafe_post(url, data=data, json=json, **kwargs, timeout=60)
