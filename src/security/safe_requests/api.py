@@ -1,7 +1,12 @@
-from .host_validators import DefaultHostValidator
-from security.exceptions import SecurityException
-from requests import get as unsafe_get, post as unsafe_post
 from urllib.parse import urlparse
+from urllib.request import urlopen as unsafe_urlopen
+
+from requests import get as unsafe_get
+from requests import post as unsafe_post
+
+from security.exceptions import SecurityException
+
+from .host_validators import DefaultHostValidator
 
 DEFAULT_PROTOCOLS = frozenset(("http", "https"))
 
@@ -30,6 +35,19 @@ class UrlParser:
     def _check_host(self, host_validator):
         if not host_validator(self.host).is_allowed:
             raise SecurityException("Disallowed host: %s", self.host)
+
+
+def urlopen(
+    url,
+    data=None,
+    timeout=None,
+    *args,
+    allowed_protocols=DEFAULT_PROTOCOLS,
+    host_validator=DefaultHostValidator,
+    **kwargs,
+):
+    UrlParser(url).check(allowed_protocols, host_validator)
+    return unsafe_urlopen(url, data, timeout, *args, **kwargs)
 
 
 def get(
