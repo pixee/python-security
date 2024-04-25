@@ -6,35 +6,15 @@ repos:
     -   id: check-json
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
-        exclude: |
-          (?x)^(
-              src/core_codemods/docs/.*|
-              src/codemodder/dependency.py |
-              integration_tests/.*|
-              tests/.*
-          )$
     -   id: check-added-large-files
-        exclude: |
-          (?x)^(
-              tests/samples/pygoat.semgrep.sarif.json
-          )$
 -   repo: https://github.com/psf/black
     rev: 24.4.0
     hooks:
     -   id: black
-        exclude: |
-          (?x)^(
-              tests/samples/.*|
-          )$
 - repo: https://github.com/pre-commit/mirrors-mypy
   rev: v1.9.0
   hooks:
    - id: mypy
-     exclude: |
-       (?x)^(
-           tests/samples/.*|
-           integration_tests/.*
-       )$
      args: [--disable-error-code=has-type,--disable-error-code=import-not-found]
      additional_dependencies:
        [
@@ -48,7 +28,6 @@ repos:
   rev: v0.3.7
   hooks:
     - id: ruff
-      exclude: tests/samples/
     # todo: replace black with this?
     # Run the formatter.
     # - id: ruff-format
@@ -56,5 +35,4 @@ repos:
   rev: 5.13.2
   hooks:
     - id: isort
-      exclude: tests/samples/
       args: ["--profile", "black"]
