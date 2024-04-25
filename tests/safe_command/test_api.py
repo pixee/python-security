@@ -1,8 +1,10 @@
+import subprocess
+
 import mock
 import pytest
-import subprocess
-from security.exceptions import SecurityException
+
 from security import safe_command
+from security.exceptions import SecurityException
 
 
 @pytest.mark.parametrize("original_func", [subprocess.run, subprocess.call])

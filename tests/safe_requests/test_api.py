@@ -1,4 +1,5 @@
 import pytest
+
 from security.exceptions import SecurityException
 from security.safe_requests import get, post
 from security.safe_requests.host_validators import DefaultHostValidator
