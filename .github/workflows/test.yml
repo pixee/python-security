@@ -1,0 +1,59 @@
+name: Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  merge-group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install build dependencies
+        run: pip install build twine
+      - name: Build package
+        run: python -m build .
+      - name: Twine Check
+        run: twine check dist/*
+  test:
+    name: Run pytest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        python-version: ['3.10',  '3.11', '3.12']
+    steps:
+      - name: install netcat
+        run: apt update && apt install -y netcat
+      - name: make bash default shell
+        run: ln -sf /bin/bash /bin/sh
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      - name: Install Codemodder Package
+        run: pip install .
+      - name: Install Dependencies
+        run: pip install -r dev_requirements.txt
+      - name: Run unit tests
+        run: pytest
