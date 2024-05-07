@@ -7,7 +7,6 @@ on:
   pull_request:
     branches:
       - main
-  merge-group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,9 +40,9 @@ jobs:
         python-version: ['3.10',  '3.11', '3.12']
     steps:
       - name: install netcat
-        run: apt update && apt install -y netcat
+        run: sudo apt update && sudo apt install -y netcat
       - name: make bash default shell
-        run: ln -sf /bin/bash /bin/sh
+        run: sudo ln -sf /bin/bash /bin/sh
       - name: Check out code
         uses: actions/checkout@v4
       - name: Set Up Python
