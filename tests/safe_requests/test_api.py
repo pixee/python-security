@@ -1,10 +1,17 @@
 import pytest
+
 from security.exceptions import SecurityException
 from security.safe_requests import get, post
 from security.safe_requests.host_validators import DefaultHostValidator
 
 
-@pytest.mark.parametrize("method_name", [get, post])
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        get,
+        post,
+    ],
+)
 class TestSafeRequestApi:
     @pytest.mark.parametrize("protocol", ["http", "https"])
     def test_url_default_safe_protocols(self, protocol, method_name):

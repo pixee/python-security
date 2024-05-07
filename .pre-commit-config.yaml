@@ -1,6 +1,6 @@
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v2.3.0
+    rev: v4.6.0
     hooks:
     -   id: check-yaml
     -   id: check-json
@@ -8,6 +8,31 @@ repos:
     -   id: trailing-whitespace
     -   id: check-added-large-files
 -   repo: https://github.com/psf/black
-    rev: 23.3.0
+    rev: 24.4.0
     hooks:
     -   id: black
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: v1.9.0
+  hooks:
+   - id: mypy
+     args: [--disable-error-code=has-type,--disable-error-code=import-not-found]
+     additional_dependencies:
+       [
+         "types-jsonschema~=4.21.0",
+         "types-mock==5.0.*",
+         "types-PyYAML==6.0",
+         "types-toml~=0.10",
+         "types-requests~=2.13",
+    ]
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.3.7
+  hooks:
+    - id: ruff
+    # todo: replace black with this?
+    # Run the formatter.
+    # - id: ruff-format
+- repo: https://github.com/pycqa/isort
+  rev: 5.13.2
+  hooks:
+    - id: isort
+      args: ["--profile", "black"]
