@@ -637,7 +637,6 @@ def check(command: ValidCommand, restrictions: ValidRestrictions, **kwargs) -> N
     # Check if the executable is set by the Popen kwargs (either executable or shell)
     # Executable takes precedence over shell. see subprocess.py line 1593
     executable_path = _resolve_executable_path(kwargs.get("executable"), venv)
-    print(executable_path)
     shell = (
         executable_path.name in COMMON_SHELLS
         if executable_path
