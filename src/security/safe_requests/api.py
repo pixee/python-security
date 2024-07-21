@@ -70,4 +70,4 @@ def post(
     **kwargs,
 ):
     UrlParser(url).check(allowed_protocols, host_validator)
-    return unsafe_post(url, data=data, json=json, **kwargs)
+    return unsafe_post(url, data=data, json=json, **kwargs, timeout=60)
