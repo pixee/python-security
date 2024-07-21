@@ -13,6 +13,7 @@ description = "The security toolkit for the Python community"
 keywords = ["security", "appsec"]
 dependencies = [
     "requests",
+    "security==1.3.0",
 ]
 
 [project.urls]
