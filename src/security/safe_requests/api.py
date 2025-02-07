@@ -1,12 +1,11 @@
 from urllib.parse import urlparse
 from urllib.request import urlopen as unsafe_urlopen
-
-from requests import get as unsafe_get
 from requests import post as unsafe_post
 
 from security.exceptions import SecurityException
 
 from .host_validators import DefaultHostValidator
+from security import safe_requests
 
 DEFAULT_PROTOCOLS = frozenset(("http", "https"))
 
@@ -58,7 +57,7 @@ def get(
     **kwargs,
 ):
     UrlParser(url).check(allowed_protocols, host_validator)
-    return unsafe_get(url, params=params, **kwargs)
+    return safe_requests.get(url, params=params, **kwargs)
 
 
 def post(
