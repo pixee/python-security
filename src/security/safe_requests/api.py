@@ -1,7 +1,7 @@
 from urllib.parse import urlparse
 from urllib.request import urlopen as unsafe_urlopen
 
-from requests import get as unsafe_get
+from security.safe_requests import get as unsafe_get
 from requests import post as unsafe_post
 
 from security.exceptions import SecurityException
